@@ -46,11 +46,20 @@ revoke insert, update, delete on pl_league_members from anon, authenticated;
 
 
 -- ---------- The four to start with ----------
+-- Only OG Predictions reaches back. Everything else starts with the
+-- current season, so a league founded now isn't credited with results
+-- from before it existed.
+create or replace function pl_season_start() returns date
+language sql stable as $$
+  select min(kickoff_utc)::date from pl_fixtures
+   where season = (select max(season) from pl_fixtures);
+$$;
+
 insert into pl_leagues (name, starts_on, sort) values
-  ('OG Predictions',    null,         1),
-  ('AMM Senior League', null,         2),
-  ('Predictions 26''',  '2026-08-01', 3),
-  ('Unwin Family',      null,         4)
+  ('OG Predictions',    null,                 1),
+  ('AMM Senior League', pl_season_start(),    2),
+  ('Predictions 26''',  pl_season_start(),    3),
+  ('Unwin Family',      pl_season_start(),    4)
 on conflict (norm_name) do update set starts_on = excluded.starts_on, sort = excluded.sort;
 
 -- Everyone currently on the books joins the two that are obviously
@@ -97,6 +106,8 @@ begin
     raise exception 'not an admin' using errcode = 'P0003';
   end if;
   if v_name = '' then raise exception 'name required' using errcode = 'P0004'; end if;
+  -- A new league starts with the current season unless told otherwise.
+  p_starts_on := coalesce(p_starts_on, pl_season_start());
   if exists (select 1 from pl_leagues l where l.norm_name = lower(v_name)) then
     raise exception 'that league already exists' using errcode = 'P0004';
   end if;

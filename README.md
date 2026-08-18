@@ -264,6 +264,11 @@ Run `leagues.sql`. It creates the tables and seeds four — OG Predictions, AMM 
 Predictions 26', Unwin Family — putting everyone currently on the books into the first and
 third. The other two are yours to fill in.
 
+Only OG Predictions reaches back. Every other league starts at the current season, and any
+league you create later does too, so a league founded now is never credited with results from
+before it existed. The season selector narrows to match: a league that began this season
+doesn't offer 2021/22, and the headline figures count only what it was around for.
+
 Membership is managed from your account panel: tap a name under a league to add or remove
 them. Only an admin sees those controls, and `pl_league_set_member` re-checks the admin flag
 server-side, so hiding the buttons isn't what's doing the work.

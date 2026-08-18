@@ -294,10 +294,8 @@
     .btn:hover{background:#fff;border-color:#fff}
     .btn.ghost:hover{background:transparent;color:var(--chalk);border-color:var(--ash)}
     details.paste summary:hover{color:var(--chalk)}
-    .pk:hover{color:var(--chalk);border-color:var(--ash)}
     .chip:hover{border-color:var(--ash);color:var(--chalk)}
     .wknav:hover:not([disabled]){border-color:var(--ash)}
-    .ebtn:hover{border-color:var(--ash)}
     table.grid tbody tr:hover td{background:rgba(255,255,255,.02)}
     .namelist button:hover{border-color:var(--ash)}
   }
@@ -568,8 +566,13 @@ function hydrateFromCache(){
 }
 
 function allSeasons(){
-  const all = new Set(state.fixtures.map(f=>f.season));
-  state.history.forEach(h=> all.add(h.season));
+  const from = leagueFrom();
+  const all = new Set(state.fixtures
+    .filter(f => !from || new Date(f.kickoff) >= from)
+    .map(f => f.season));
+  state.history.forEach(h => {
+    if(!from || new Date(h.played_on + "T00:00:00Z") >= from) all.add(h.season);
+  });
   return [...all].sort().reverse();
 }
 // A season with no results yet has nothing for the retrospective
@@ -578,8 +581,13 @@ function allSeasons(){
 // season that actually has something in it; the live season takes
 // over by itself once its first results land.
 function seasonsWithData(){
-  const has = new Set(state.fixtures.filter(SETTLED).map(f=>f.season));
-  state.history.forEach(h=> has.add(h.season));
+  const from = leagueFrom();
+  const has = new Set(state.fixtures
+    .filter(f => SETTLED(f) && (!from || new Date(f.kickoff) >= from))
+    .map(f => f.season));
+  state.history.forEach(h => {
+    if(!from || new Date(h.played_on + "T00:00:00Z") >= from) has.add(h.season);
+  });
   return [...has].sort().reverse();
 }
 function pickSeason(){
@@ -1063,7 +1071,7 @@ function wireEntry(){
     e.i++;
     render();
   };
-  $$(".ebtn").forEach(b=> b.onclick = ()=> pick(b.dataset.pick));
+  $$(".ebtn").forEach(b=> b.onclick = (ev)=>{ ev.currentTarget.blur(); pick(b.dataset.pick); });
   $("#ePrev") && ($("#ePrev").onclick = ()=>{ if(e.i>0){ e.i--; render(); } });
   $("#eSkip") && ($("#eSkip").onclick = ()=>{ e.i++; render(); });
   $("#eBack") && ($("#eBack").onclick = ()=>{ e.i = Math.max(0, list.length-1); render(); });
@@ -1209,7 +1217,7 @@ function fixtureRow(f, idx){
 
 function wirePredict(){
   wireCommon();
-  $$(".pk").forEach(b=> b.onclick = ()=> savePick(b.dataset.fx, b.dataset.pick));
+  $$(".pk").forEach(b=> b.onclick = (ev)=>{ ev.currentTarget.blur(); savePick(b.dataset.fx, b.dataset.pick); });
   const weeks = openWeeks(), at = weeks.indexOf(currentWeek());
   $("#wkPrev") && ($("#wkPrev").onclick = ()=>{ if(at>0){ state.week = weeks[at-1]; state.bulk=""; render(); } });
   $("#wkNext") && ($("#wkNext").onclick = ()=>{ if(at<weeks.length-1){ state.week = weeks[at+1]; state.bulk=""; render(); } });
@@ -1341,7 +1349,9 @@ function wireCommon(){
     state.league = b.dataset.league || null;
     state.leagueChosen = true;
     if(state.league) LS.set(K.league, state.league); else LS.del(K.league);
-    state.statPlayer = null; render();
+    state.statPlayer = null;
+    pickSeason();                 // the season on screen may not exist for this league
+    render();
   });
   $$(".segbtn[data-season]").forEach(b=> b.onclick = ()=>{
     state.season = b.dataset.season; state.seasonChosen = true;
