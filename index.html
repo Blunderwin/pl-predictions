@@ -107,6 +107,11 @@
   .row > *{flex:1}
 
   /* ---------- Bulk entry ---------- */
+  details.paste{margin-top:10px}
+  details.paste summary{cursor:pointer;list-style:none;font-size:12px;color:var(--ash);
+    padding:6px 0;text-align:center}
+  details.paste summary::-webkit-details-marker{display:none}
+  details.paste summary:hover{color:var(--chalk)}
   .bulk{border:1px solid var(--rule);border-radius:var(--r);padding:12px;background:var(--ink)}
   .bulk input{font-family:"Space Mono";font-size:21px;letter-spacing:.4em;text-transform:uppercase;
     text-align:center;text-indent:.4em;background:transparent;border-color:var(--rule)}
@@ -160,6 +165,39 @@
   .wklabel b{font-family:"Barlow Condensed";font-size:15px;letter-spacing:.14em;
     text-transform:uppercase;display:block}
   .wklabel span{font-size:11.5px;color:var(--ash)}
+
+  /* Focused entry — one fixture, filling the screen, no list to scroll */
+  .entry{position:fixed;inset:0;z-index:60;background:var(--ink);display:flex;flex-direction:column;
+    padding:calc(env(safe-area-inset-top) + 14px) 16px calc(env(safe-area-inset-bottom) + 16px)}
+  .entry .ehead{display:flex;align-items:center;gap:12px;padding-bottom:12px;border-bottom:1px solid var(--rule)}
+  .entry .ehead .etitle{font-family:"Barlow Condensed";font-size:14px;letter-spacing:.16em;
+    text-transform:uppercase;color:var(--ash)}
+  .entry .ehead .eclose{margin-left:auto;background:transparent;border:1px solid var(--rule);
+    color:var(--chalk);border-radius:var(--r);padding:7px 13px;font-size:12.5px}
+  .eprog{display:flex;gap:3px;margin:12px 0 0}
+  .eprog i{flex:1;height:3px;background:var(--rule);border-radius:2px}
+  .eprog i.done{background:var(--ok)}
+  .eprog i.at{background:var(--mark)}
+  .ebody{flex:1;display:flex;flex-direction:column;justify-content:center;text-align:center;gap:6px;min-height:0}
+  .ebody .ewhen{font-family:"Space Mono";font-size:12.5px;color:var(--ash);letter-spacing:.04em}
+  .ebody .eteam{font-family:"Barlow Condensed";font-weight:600;font-size:clamp(28px,9vw,44px);
+    line-height:1.05;letter-spacing:.02em}
+  .ebody .ev{font-size:12px;letter-spacing:.24em;text-transform:uppercase;color:var(--ash);margin:2px 0}
+  .ebody .ecount{font-family:"Space Mono";font-size:12px;color:var(--ash);margin-top:14px}
+  .ebtns{display:flex;flex-direction:column;gap:9px}
+  .ebtn{display:flex;align-items:center;gap:12px;width:100%;text-align:left;
+    background:transparent;border:1px solid var(--rule);border-radius:var(--r);
+    color:var(--chalk);padding:15px 16px;font-size:16px;transition:.12s}
+  .ebtn:hover{border-color:var(--ash)}
+  .ebtn[aria-pressed="true"]{border-color:var(--chalk);background:rgba(255,255,255,.05)}
+  .ebtn kbd{font-family:"Space Mono";font-size:13px;font-weight:700;min-width:30px;height:30px;
+    display:inline-grid;place-items:center;border:1px solid var(--rule);border-radius:5px;color:var(--ash)}
+  .ebtn[aria-pressed="true"] kbd{border-color:var(--chalk);color:var(--chalk)}
+  .ebtn .elabel{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .efoot{display:flex;gap:9px;margin-top:12px}
+  .efoot .btn{flex:1}
+  .edone{text-align:center;padding:20px 0}
+  .edone .big{font-family:"Space Mono";font-size:34px;color:var(--mark)}
 
   /* Deadline nudge */
   .nudge{margin-top:12px;padding:10px 12px;border:1px solid var(--mark);border-left-width:3px;
@@ -459,6 +497,7 @@ const state = {
   seasonChosen: false,         // true once the user picks one by hand
   bulk: "",                    // raw text in the bulk box
   week: null,                  // matchweek on screen in Predict
+  entry: null,                 // focused entry run: {i, picks:{fixtureId:pick}}
   resultsMd: null,             // matchday shown in Results
   statPlayer: null,            // drill-down in Stats
   identityOpen: false,
@@ -570,6 +609,7 @@ function render(){
   renderWhoami();
   const app = $("#app");
   if(!state.me || state.identityOpen){ app.innerHTML = viewIdentity(); wireIdentity(); return; }
+  if(state.tab==="predict" && state.entry){ app.innerHTML = viewEntry(); wireEntry(); return; }
   if(state.tab==="predict"){ app.innerHTML = viewPredict(); wirePredict(); return; }
   if(state.tab==="table")  { app.innerHTML = viewTable();   wireCommon(); return; }
   if(state.tab==="results"){ app.innerHTML = viewResults(); wireResults(); return; }
@@ -806,21 +846,148 @@ function viewPredict(){
 
     ${nudgeBanner()}
 
-    <div class="bulk" style="margin-top:12px">
-      <input type="text" id="bulkBox" value="${esc(state.bulk)}" placeholder="HDHHA"
-        autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="60" />
-      <div class="hint" id="bulkHint"></div>
-      <div class="row" style="margin-top:10px">
-        <button class="btn ghost sm" id="bulkClear" style="flex:1">Clear</button>
-        <button class="btn sm" id="bulkApply" style="flex:2" disabled>Apply</button>
-      </div>
+    <div class="row" style="margin-top:12px">
+      <button class="btn" id="startEntry">${mine ? "Carry on predicting" : "Start predicting"}</button>
     </div>
+
+    <details class="paste" ${state.bulk ? "open" : ""}>
+      <summary>or paste a string</summary>
+      <div class="bulk">
+        <input type="text" id="bulkBox" value="${esc(state.bulk)}" placeholder="HDHHA"
+          autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="60" />
+        <div class="hint" id="bulkHint"></div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn ghost sm" id="bulkClear" style="flex:1">Clear</button>
+          <button class="btn sm" id="bulkApply" style="flex:2" disabled>Apply</button>
+        </div>
+      </div>
+    </details>
 
     <div style="margin-top:6px">${body}</div>
     ${list.some(moved) ? `<div class="sub" style="margin-top:10px">&dagger; kick-off moved since the fixture was first published.</div>` : ""}
     ${othersKey()}
     ${refreshRow()}
   </section>`;
+}
+
+/* One fixture filling the screen, three buttons naming the actual
+   teams, and h/d/a on a keyboard. The bulk box works well when you're
+   pasting a string you already have, and badly when you're composing
+   one — the list scrolls under the caret and the row you're on isn't
+   the row you're looking at. This is the other half of that.
+
+   Picks are held locally and written in one call at the end, so a
+   ten-match week is one round trip rather than ten. */
+function entryFixtures(){ return weekFixtures(); }
+
+function startEntry(){
+  const list = entryFixtures();
+  if(!list.length) return;
+  const firstOpen = list.findIndex(f => !myPick(f.id));
+  state.entry = { i: firstOpen < 0 ? 0 : firstOpen, picks: {} };
+  render();
+}
+
+function viewEntry(){
+  const list = entryFixtures();
+  const e = state.entry;
+  const chosen = id => e.picks[id] || (myPick(id) === "?" ? null : myPick(id));
+  const doneCount = list.filter(f => chosen(f.id)).length;
+
+  if(e.i >= list.length){
+    const pending = Object.keys(e.picks).length;
+    return `<div class="entry">
+      <div class="ehead"><span class="etitle">Matchweek ${currentWeek()}</span>
+        <button class="eclose" id="eClose">Close</button></div>
+      <div class="ebody">
+        <div class="edone">
+          <div class="big">${doneCount}/${list.length}</div>
+          <div class="sub">called for matchweek ${currentWeek()}</div>
+        </div>
+      </div>
+      <div class="ebtns">
+        <button class="btn" id="eSave" ${pending?"":"disabled"}>${pending ? `Save ${pending} prediction${pending===1?"":"s"}` : "Nothing new to save"}</button>
+        <button class="btn ghost" id="eBack">Back a match</button>
+        <button class="btn ghost" id="eClose2">Done</button>
+      </div>
+    </div>`;
+  }
+
+  const f = list[e.i];
+  const cur = chosen(f.id);
+  const opts = [
+    { k:"H", label:f.homeShort, note:"home win" },
+    { k:"D", label:"Draw",      note:"" },
+    { k:"A", label:f.awayShort, note:"away win" }
+  ];
+  return `<div class="entry">
+    <div class="ehead">
+      <span class="etitle">Matchweek ${currentWeek()}</span>
+      <button class="eclose" id="eClose">Close</button>
+    </div>
+    <div class="eprog">${list.map((x,i)=>
+      `<i class="${i===e.i?"at":chosen(x.id)?"done":""}"></i>`).join("")}</div>
+
+    <div class="ebody">
+      <div class="ewhen">${esc(fmtDay(f.kickoff))} &middot; ${esc(fmtTime(f.kickoff))}${moved(f)?" &dagger;":""}</div>
+      <div class="eteam">${esc(f.homeShort)}</div>
+      <div class="ev">v</div>
+      <div class="eteam">${esc(f.awayShort)}</div>
+      <div class="ecount">${e.i+1} of ${list.length}</div>
+    </div>
+
+    <div class="ebtns">
+      ${opts.map(o=>`<button class="ebtn" data-pick="${o.k}" aria-pressed="${cur===o.k}">
+        <kbd>${o.k}</kbd><span class="elabel">${esc(o.label)}</span>
+        <span class="sub" style="margin:0">${o.note}</span></button>`).join("")}
+    </div>
+    <div class="efoot">
+      <button class="btn ghost sm" id="ePrev" ${e.i===0?"disabled":""}>&lsaquo; Back</button>
+      <button class="btn ghost sm" id="eSkip">Skip &rsaquo;</button>
+    </div>
+  </div>`;
+}
+
+function wireEntry(){
+  const list = entryFixtures();
+  const e = state.entry;
+  const pick = (k)=>{
+    const f = list[e.i];
+    if(!f) return;
+    e.picks[f.id] = k;
+    e.i++;
+    render();
+  };
+  $$(".ebtn").forEach(b=> b.onclick = ()=> pick(b.dataset.pick));
+  $("#ePrev") && ($("#ePrev").onclick = ()=>{ if(e.i>0){ e.i--; render(); } });
+  $("#eSkip") && ($("#eSkip").onclick = ()=>{ e.i++; render(); });
+  $("#eBack") && ($("#eBack").onclick = ()=>{ e.i = Math.max(0, list.length-1); render(); });
+  const close = async ()=>{ await flushEntry(); state.entry = null; render(); };
+  $("#eClose")  && ($("#eClose").onclick  = close);
+  $("#eClose2") && ($("#eClose2").onclick = close);
+  $("#eSave")   && ($("#eSave").onclick   = close);
+
+  document.onkeydown = (ev)=>{
+    if(!state.entry) return;
+    const k = ev.key.toUpperCase();
+    if("HDA".includes(k) && k.length===1){ ev.preventDefault(); pick(k); }
+    else if(ev.key==="ArrowLeft" || ev.key==="Backspace"){ ev.preventDefault(); if(e.i>0){ e.i--; render(); } }
+    else if(ev.key==="ArrowRight"){ ev.preventDefault(); e.i++; render(); }
+    else if(ev.key==="Escape"){ ev.preventDefault(); close(); }
+  };
+}
+
+// One write for the whole run.
+async function flushEntry(){
+  document.onkeydown = null;
+  const e = state.entry;
+  if(!e) return;
+  const rows = Object.entries(e.picks)
+    .map(([id, pick]) => ({ fixture: state.fixtures.find(f => String(f.id) === String(id)), pick }))
+    .filter(r => r.fixture);
+  if(!rows.length) return;
+  const ok = await sendPicks(rows);
+  if(ok) toast(`${rows.length} prediction${rows.length===1?"":"s"} in.`);
 }
 
 // Shown whenever there's nothing to predict: says what is actually on
@@ -921,6 +1088,8 @@ function wirePredict(){
   $("#wkPrev") && ($("#wkPrev").onclick = ()=>{ if(at>0){ state.week = weeks[at-1]; state.bulk=""; render(); } });
   $("#wkNext") && ($("#wkNext").onclick = ()=>{ if(at<weeks.length-1){ state.week = weeks[at+1]; state.bulk=""; render(); } });
 
+  $("#startEntry") && ($("#startEntry").onclick = startEntry);
+
   const box = $("#bulkBox");
   if(!box) return;
   const repaint = ()=>{ state.bulk = box.value; paintBulk(); };
@@ -928,12 +1097,7 @@ function wirePredict(){
   $("#bulkClear").onclick = ()=>{ box.value=""; state.bulk=""; paintBulk(); box.focus(); };
   $("#bulkApply").onclick = applyBulk;
   paintBulk();
-  // Land straight in the box on a fresh visit — the common case is
-  // pasting a string, not tapping twenty buttons. Only on first
-  // mount, so a background refresh never steals the caret.
-  if(!state.bulk && !bulkFocused){ box.focus({preventScroll:true}); bulkFocused = true; }
 }
-let bulkFocused = false;
 let INITIALS = {};
 
 // Paints the parsed string onto the fixture rows without re-rendering,
@@ -1676,13 +1840,16 @@ function wireStats(){
 /* ---------------------------------------------------------------
    13. GO
    --------------------------------------------------------------- */
-$$("#tabs button").forEach(b=> b.onclick = ()=>{
+$$("#tabs button").forEach(b=> b.onclick = async ()=>{
+  // Leaving mid-run still saves what was called, and unbinds the key
+  // handler — otherwise h/d/a would keep firing on another tab.
+  if(state.entry){ await flushEntry(); state.entry = null; }
   state.tab = b.dataset.view; state.statPlayer = null; state.identityOpen = false;
   render(); window.scrollTo(0,0);
 });
 // A pick can lock while the page sits open on a Saturday afternoon.
 setInterval(()=>{
-  if(state.tab!=="predict" || state.identityOpen) return;
+  if(state.tab!=="predict" || state.identityOpen || state.entry) return;
   if(document.activeElement === $("#bulkBox")) return;   // don't yank the caret mid-string
   render();
 }, 60000);

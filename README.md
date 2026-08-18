@@ -94,6 +94,13 @@ what it always did. A live preview highlights each button before you commit; it 
 a string containing typos or one longer than the fixture list. `Copy my string` gives you
 the same thing back for posting to the group.
 
+**Two ways in.** *Start predicting* opens a focused run: one fixture filling the screen,
+three buttons naming the actual teams, `h` `d` `a` on a keyboard, arrows or backspace to go
+back. Picks are held locally and written in a single call at the end, so a ten-match week is
+one round trip. Pasting a string still works — it's folded behind *or paste a string* — but
+it's the wrong tool for composing one, because the list scrolls under the caret while you
+type.
+
 **One week at a time.** Predict pages by matchweek with prev/next rather than scrolling the
 rest of the season. The bulk box maps onto the week you're looking at, so a string is read
 against the fixtures in front of you.
