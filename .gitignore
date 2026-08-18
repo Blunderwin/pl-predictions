@@ -1,4 +1,9 @@
 node_modules/
-whatsapp-import-report.tsv
 *.local
 .DS_Store
+
+# Chat exports and anything derived from them. These carry the group's
+# actual messages; the repo is public.
+*.tsv
+*_chat.txt
+*.zip

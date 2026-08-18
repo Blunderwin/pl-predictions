@@ -2,34 +2,51 @@
 /**
  * Reconstruct historic predictions from a WhatsApp chat export.
  *
- * The insight this rests on: a message like "_AHHA" posted at 09:58 on
- * a Saturday is only meaningful against the fixtures that were still
- * open at 09:58, in kick-off order. That is exactly the mapping the
- * live app does — so with the fixture list backfilled, the group's
- * chat history IS the prediction history.
+ * The idea: a message like "_AHHA" posted at 09:58 on a Saturday is
+ * only meaningful against the fixtures still open at 09:58, in
+ * kick-off order. That's the same mapping the live app does, so with
+ * the fixture list to hand the chat history IS the prediction history.
  *
- * It will not get everything right on its own. "HAHAHA" is both a
- * valid five-match call and a laugh; a string posted after part of the
- * batch kicked off shifts alignment; people repost and correct. So the
- * default is a report you read, not a write you trust.
+ * What the real export taught us, and what this now handles:
  *
- * Export the chat from WhatsApp: chat > Export Chat > Without Media.
+ *   Multi-line messages are one line per day, posted as a block.
+ *   Stripping the newlines concatenates them in kick-off order, which
+ *   is the right answer as long as the days are consecutive.
+ *
+ *   Off-season messages are a different competition. In the 2026 close
+ *   season the group predicted the World Cup, in a "15th - HHHAD"
+ *   format with several matches a day. Mapping those onto the next
+ *   Premier League fixtures would be worse than useless, so anything
+ *   outside a known season window is dropped rather than guessed at.
+ *
+ *   Long strings are usually celebration. A Premier League gameweek is
+ *   ten matches, so "AHHHHHHHHHHH" after a late winner is not a call.
+ *
+ * Nothing is written without --write, and the report is the point.
  *
  * Usage:
- *   node scripts/import-whatsapp.mjs chat.txt                 # report only
- *   node scripts/import-whatsapp.mjs chat.txt --write         # then insert
- *   node scripts/import-whatsapp.mjs chat.txt --map map.json  # author -> player name
+ *   node scripts/import-whatsapp.mjs _chat.txt --seasons 2024,2025
+ *   node scripts/import-whatsapp.mjs _chat.txt --seasons 2024,2025 --write
  *
- * Env: SUPABASE_URL, SUPABASE_SERVICE_KEY
+ * Fixtures come from football-data.co.uk with the same ids the
+ * backfill writes, so the report can be checked before the database
+ * has anything in it. --write needs SUPABASE_URL and
+ * SUPABASE_SERVICE_KEY, and needs the fixture backfill run first.
  */
 import { readFileSync, writeFileSync } from "node:fs";
+import { fetchSeason } from "./lib/pl-csv.mjs";
 
-const FILE  = process.argv[2];
-const WRITE = process.argv.includes("--write");
-const MAPF  = argVal("--map");
-const OUT   = argVal("--out") || "whatsapp-import-report.tsv";
+const FILE    = process.argv[2];
+const WRITE   = process.argv.includes("--write");
+const MAPF    = argVal("--map");
+const OUT     = argVal("--out") || "whatsapp-import-report.tsv";
+const SEASONS = (argVal("--seasons") || "").split(",").filter(Boolean).map(Number);
+const MAX_RUN = Number(argVal("--max") || 10);   // longest believable batch
 
-if(!FILE){ console.error("Usage: node scripts/import-whatsapp.mjs <export.txt> [--write] [--map map.json]"); process.exit(1); }
+if(!FILE || !SEASONS.length){
+  console.error("Usage: node scripts/import-whatsapp.mjs <export.txt> --seasons 2024,2025 [--write] [--map map.json]");
+  process.exit(1);
+}
 function argVal(flag){ const i = process.argv.indexOf(flag); return i > -1 ? process.argv[i+1] : null; }
 
 const SB_URL = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
@@ -51,29 +68,25 @@ async function sb(path, init){
 const IOS = /^‎?\[(\d{1,2})\/(\d{1,2})\/(\d{2,4}),\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap]m)?\]\s*([^:]{1,40}):\s*(.*)$/i;
 const AND = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4}),\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap]m)?\s+-\s+([^:]{1,40}):\s*(.*)$/i;
 
-function parseLines(text){
+export function parseLines(text){
   const out = [];
   for(const raw of text.split(/\r?\n/)){
-    const m = raw.match(IOS) || raw.match(AND);
+    const line = raw.replace(/‎/g, "");
+    const m = line.match(IOS) || line.match(AND);
     if(!m){                                  // continuation of a multi-line message
-      if(out.length) out[out.length-1].text += "\n" + raw;
+      if(out.length) out[out.length-1].text += "\n" + line;
       continue;
     }
     let [, d, mo, y, hh, mm, ss, ampm, author, body] = m;
     y = y.length === 2 ? 2000 + Number(y) : Number(y);
     hh = Number(hh);
     if(ampm){ const pm = /p/i.test(ampm); if(hh === 12) hh = pm ? 12 : 0; else if(pm) hh += 12; }
-    // WhatsApp stamps in the exporter's local time. UK local -> UTC.
     const naive = Date.UTC(y, mo - 1, Number(d), hh, Number(mm), Number(ss || 0));
-    out.push({
-      ts: new Date(naive - bstOffsetMs(naive)),
-      author: author.replace(/‎/g, "").trim(),
-      text: body.replace(/‎/g, "").trim()
-    });
+    out.push({ ts:new Date(naive - bst(naive)), author:author.trim(), text:body.trim() });
   }
-  return out;
+  return out.map(m => ({ ...m, text: m.text.replace(/\s*<This message was edited>\s*/gi, "").trim() }));
 }
-function bstOffsetMs(utcMs){
+function bst(utcMs){
   const y = new Date(utcMs).getUTCFullYear();
   const lastSun = (month) => {
     const dd = new Date(Date.UTC(y, month + 1, 0));
@@ -82,114 +95,168 @@ function bstOffsetMs(utcMs){
   return (utcMs >= lastSun(2) && utcMs < lastSun(9)) ? 3600e3 : 0;
 }
 
-const LETTERS = /^[HAD_\-.*\s]+$/i;
-function asPicks(text){
+const LETTERS = /^[HAD_\-.*\s]+$/;
+export function asPicks(text){
   const t = text.replace(/\s/g, "");
-  if(t.length < 1 || t.length > 20) return null;
+  if(t.length < 1 || t.length > 24) return null;
+  // Case is the cleanest signal in the whole export: across 515
+  // candidate messages, 509 were typed in full caps and five of the
+  // six that weren't are laughter. Anything not shouted isn't a call.
   if(!LETTERS.test(t)) return null;
-  const picks = [...t.toUpperCase()].map(c => "HAD".includes(c) ? c : null);
+  const picks = [...t].map(c => "HAD".includes(c) ? c : null);
   if(!picks.some(Boolean)) return null;
   return picks;
 }
-// "HAHAHA", "HAHAHAHA" — laughter reads as a legal string. Flag rather
-// than guess; five of these in a season is a two-minute read-through.
-const looksLikeLaughter = t => /^(ha){3,}$|^(ah){3,}$/i.test(t.replace(/\s/g, ""));
-// A lone "A" is a one-match call in this group's history, so it counts —
-// but it's also the likeliest false positive, so it goes in the report
-// marked for a look rather than being trusted.
-const isSingle = t => t.replace(/\s/g, "").length === 1;
+// Strictly alternating H and A. "HAHA" and "AHAH" are laughter;
+// "HAHHA" has a double and is a real call, so alternation is the test.
+export const looksLikeLaughter = t => {
+  const s = t.replace(/\s/g, "");
+  return s.length >= 4 && (/^(HA)+$/.test(s) || /^(AH)+$/.test(s));
+};
+export const isSingle  = t => t.replace(/\s/g, "").length === 1;
+export const isChanting = t => { const s = t.replace(/\s/g, ""); return s.length >= 6 && new Set(s.toUpperCase()).size === 1; };
 
 /* ---------- Main ---------- */
-const messages = parseLines(readFileSync(FILE, "utf8"));
-if(!messages.length){ console.error("No messages parsed — is this a WhatsApp export?"); process.exit(1); }
-console.log(`${messages.length} messages, ${messages[0].ts.toISOString().slice(0,10)} to ${messages[messages.length-1].ts.toISOString().slice(0,10)}`);
+const iso  = d => d.toISOString().slice(0, 16).replace("T", " ");
+const flat = t => t.replace(/\s+/g, " ").slice(0, 60);
 
-const authors = [...new Set(messages.map(m => m.author))];
-const nameMap = MAPF ? JSON.parse(readFileSync(MAPF, "utf8")) : {};
-console.log(`Authors: ${authors.join(", ")}`);
-
-// Fixtures and players come from the database — run the backfill first.
-let fixtures = [], players = [];
-if(SB_URL && SB_KEY){
-  fixtures = await (await sb("pl_fixtures?select=id,season,kickoff_utc,home,away,home_short,away_short,result&order=kickoff_utc.asc")).json();
-  players  = await (await sb("pl_players?select=id,name")).json();
-}else{
-  console.error("Set SUPABASE_URL and SUPABASE_SERVICE_KEY — the report needs the fixture list.");
-  process.exit(1);
-}
-if(!fixtures.length){ console.error("No fixtures on file. Run backfill-fixtures.mjs first."); process.exit(1); }
-console.log(`${fixtures.length} fixtures, ${players.length} players on file`);
-
-const byName = new Map(players.map(p => [p.name.toLowerCase(), p]));
-const resolve = (author) => {
-  const want = (nameMap[author] || author).toLowerCase();
-  return byName.get(want) || [...byName.values()].find(p => want.startsWith(p.name.toLowerCase()));
-};
-
-const unresolved = authors.filter(a => !resolve(a));
-if(unresolved.length){
-  console.error(`\nCan't match these chat names to players: ${unresolved.join(", ")}`);
-  console.error(`Add them in the app, or pass --map with e.g. {"Ben Wright":"Ben"}`);
-  process.exit(1);
+if(process.argv[1].endsWith("import-whatsapp.mjs")){
+  await main();
 }
 
-// Same ordering rule as the app: kick-off, then home team.
-fixtures.sort((a, b) => new Date(a.kickoff_utc) - new Date(b.kickoff_utc) || a.home.localeCompare(b.home));
+async function main(){
+  const messages = parseLines(readFileSync(FILE, "utf8"));
+  if(!messages.length){ console.error("No messages parsed — is this a WhatsApp export?"); process.exit(1); }
+  console.log(`${messages.length} messages, ${iso(messages[0].ts)} to ${iso(messages[messages.length-1].ts)}`);
 
-const rows = [];        // one per resolved prediction
-const report = [["status","when","author","string","fixture","kickoff","pick","result"].join("\t")];
-let flagged = 0, skipped = 0;
+  // Fixtures, and the window each season occupies. A message outside
+  // every window is another competition or the close season.
+  const fixtures = [];
+  const windows  = [];
+  for(const y of SEASONS){
+    const { label, rows } = await fetchSeason(y);
+    fixtures.push(...rows);
+    // Open the window a fortnight early: calls for the opening
+    // weekend get posted before a ball is kicked.
+    windows.push({
+      label,
+      from: new Date(new Date(rows[0].kickoff_utc).getTime() - 14*24*3600e3),
+      to:   new Date(rows[rows.length-1].kickoff_utc)
+    });
+    console.log(`  ${label}: ${rows.length} fixtures, ${iso(new Date(rows[0].kickoff_utc))} to ${iso(new Date(rows[rows.length-1].kickoff_utc))}`);
+  }
+  fixtures.sort((a,b)=> new Date(a.kickoff_utc) - new Date(b.kickoff_utc) || a.home.localeCompare(b.home));
+  const seasonAt = d => (windows.find(w => d >= w.from && d <= w.to) || {}).label || null;
 
-for(const msg of messages){
-  const picks = asPicks(msg.text);
-  if(!picks){ skipped++; continue; }
-  const player = resolve(msg.author);
-  const openAt = fixtures.filter(f => new Date(f.kickoff_utc) > msg.ts);
-  const laugh = looksLikeLaughter(msg.text);
-  const single = isSingle(msg.text);
-  if(laugh || single) flagged++;
+  const nameMap = MAPF ? JSON.parse(readFileSync(MAPF, "utf8")) : {};
+  const rows = [], report = [["status","when","season","author","message","fixture","kickoff","pick","result"].join("\t")];
+  const counts = { offSeason:0, chat:0, tooLong:0, laughter:0, single:0, chant:0, overrun:0, ok:0 };
+  const posters = new Set();
 
-  picks.forEach((pick, i) => {
-    if(!pick) return;
-    const f = openAt[i];
-    if(!f){
-      report.push(["NO-FIXTURE", msg.ts.toISOString(), msg.author, msg.text, "", "", pick, ""].join("\t"));
-      return;
+  for(const msg of messages){
+    const picks = asPicks(msg.text);
+    if(!picks){ counts.chat++; continue; }
+
+    const season = seasonAt(msg.ts);
+    if(!season){
+      counts.offSeason++;
+      report.push(["OFF-SEASON", iso(msg.ts), "", msg.author, flat(msg.text), "", "", "", ""].join("\t"));
+      continue;
     }
-    rows.push({ player_id:player.id, fixture_id:f.id, pick, created_at:msg.ts.toISOString(), updated_at:msg.ts.toISOString() });
-    report.push([
-      laugh ? "CHECK-LAUGH" : single ? "CHECK-SINGLE" : "OK",
-      msg.ts.toISOString(), msg.author, msg.text,
-      `${f.home_short} v ${f.away_short}`, f.kickoff_utc, pick, f.result || ""
-    ].join("\t"));
+    if(picks.length > MAX_RUN){
+      counts.tooLong++;
+      report.push(["TOO-LONG", iso(msg.ts), season, msg.author, flat(msg.text), "", "", "", ""].join("\t"));
+      continue;
+    }
+    const laugh = looksLikeLaughter(msg.text), single = isSingle(msg.text), chant = isChanting(msg.text);
+    if(laugh) counts.laughter++; if(single) counts.single++; if(chant) counts.chant++;
+    posters.add(msg.author);
+
+    const openAt = fixtures.filter(f => new Date(f.kickoff_utc) > msg.ts && f.season === season);
+    picks.forEach((pick, i) => {
+      if(!pick) return;
+      const f = openAt[i];
+      if(!f){
+        counts.overrun++;
+        report.push(["PAST-END", iso(msg.ts), season, msg.author, flat(msg.text), "", "", pick, ""].join("\t"));
+        return;
+      }
+      counts.ok++;
+      rows.push({ author:msg.author, fixture:f, pick, ts:msg.ts,
+                  status: laugh ? "CHECK-LAUGH" : chant ? "CHECK-CHANT" : single ? "CHECK-SINGLE" : "OK" });
+      report.push([
+        laugh ? "CHECK-LAUGH" : chant ? "CHECK-CHANT" : single ? "CHECK-SINGLE" : "OK",
+        iso(msg.ts), season, msg.author, flat(msg.text),
+        `${f.home_short} v ${f.away_short}`, f.kickoff_utc, pick, f.result
+      ].join("\t"));
+    });
+  }
+
+  // Later messages win: a repost is a correction.
+  const dedup = new Map();
+  for(const r of rows) dedup.set(`${r.author}|${r.fixture.id}`, r);
+  const final = [...dedup.values()];
+
+  writeFileSync(OUT, report.join("\n"));
+
+  console.log(`\nmessages ignored as chat: ${counts.chat}`);
+  console.log(`dropped, outside a season window: ${counts.offSeason}`);
+  console.log(`dropped, longer than ${MAX_RUN} picks: ${counts.tooLong}`);
+  console.log(`picks that ran past the end of the season: ${counts.overrun}`);
+  console.log(`flagged for a look — laughter ${counts.laughter}, chanting ${counts.chant}, lone letter ${counts.single}`);
+  console.log(`\n${final.length} predictions reconstructed (${rows.length - final.length} superseded)`);
+
+  // The number that matters. H/A/D calls land near 40-55%; well outside
+  // that, the strings are misaligned rather than the callers unlucky.
+  const bySeason = {};
+  for(const r of final){
+    const k = `${r.fixture.season}|${r.author}`;
+    const b = bySeason[k] || (bySeason[k] = { n:0, ok:0 });
+    b.n++; if(r.pick === r.fixture.result) b.ok++;
+  }
+  console.log("\nstrike rate by season and player:");
+  Object.entries(bySeason).sort().forEach(([k,v])=>{
+    const [s, who] = k.split("|");
+    console.log(`  ${s}  ${who.padEnd(16)} ${String(v.ok).padStart(3)}/${String(v.n).padEnd(3)}  ${Math.round(v.ok/v.n*100)}%`);
   });
+
+  // Per-matchday totals, to diff against the spreadsheet.
+  const md = {};
+  for(const r of final){
+    const k = `${r.fixture.season}\t${r.fixture.matchday}\t${r.author}`;
+    const b = md[k] || (md[k] = { n:0, ok:0 });
+    b.n++; if(r.pick === r.fixture.result) b.ok++;
+  }
+  const mdFile = OUT.replace(/\.tsv$/, "") + "-by-matchday.tsv";
+  writeFileSync(mdFile, ["season\tmatchday\tplayer\tcorrect\tplayed",
+    ...Object.entries(md).sort().map(([k,v])=> `${k}\t${v.ok}\t${v.n}`)].join("\n"));
+
+  console.log(`\nreport:            ${OUT}`);
+  console.log(`matchday totals:   ${mdFile}   <- diff this against the spreadsheet`);
+
+  if(!WRITE){ console.log(`\nNothing written. Re-run with --write once both files read right.`); return; }
+
+  const players = await (await sb("pl_players?select=id,name")).json();
+  const byName = new Map(players.map(p => [p.name.toLowerCase(), p]));
+  const resolve = a => byName.get((nameMap[a] || a).toLowerCase())
+                    || [...byName.values()].find(p => (nameMap[a] || a).toLowerCase().startsWith(p.name.toLowerCase()));
+  const unresolved = [...posters].filter(a => !resolve(a));
+  if(unresolved.length){
+    console.error(`\nCan't match these chat names to players: ${unresolved.join(", ")}`);
+    console.error(`Pass --map with e.g. {"Tobias Unwin":"Toby"}`);
+    process.exit(1);
+  }
+
+  const payload = final.map(r => ({
+    player_id: resolve(r.author).id, fixture_id: r.fixture.id, pick: r.pick,
+    created_at: r.ts.toISOString(), updated_at: new Date().toISOString()
+  }));
+  for(let i = 0; i < payload.length; i += 200){
+    await sb("pl_predictions?on_conflict=player_id,fixture_id", {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify(payload.slice(i, i + 200))
+    });
+  }
+  console.log(`\n${payload.length} predictions written.`);
 }
-
-// Later messages win: a repost is a correction.
-const dedup = new Map();
-for(const r of rows) dedup.set(`${r.player_id}|${r.fixture_id}`, r);
-const final = [...dedup.values()];
-const overwritten = rows.length - final.length;
-
-writeFileSync(OUT, report.join("\n"));
-const hits = final.filter(r => {
-  const f = fixtures.find(x => x.id === r.fixture_id);
-  return f && f.result === r.pick;
-}).length;
-
-console.log(`\n${final.length} predictions reconstructed (${overwritten} superseded by later messages)`);
-console.log(`${hits} of them correct — ${Math.round(hits / Math.max(1, final.length) * 100)}%`);
-console.log(`${flagged} messages flagged for a look (laughter or a lone letter), ${skipped} ignored as chat`);
-console.log(`\nReport written to ${OUT}. Open it in a spreadsheet and read it before writing.`);
-console.log(`A strike rate wildly off 40-50% is the signal that the alignment is wrong somewhere.`);
-
-if(!WRITE){ console.log(`\nNothing written. Re-run with --write once the report looks right.`); process.exit(0); }
-
-for(let i = 0; i < final.length; i += 200){
-  await sb("pl_predictions?on_conflict=player_id,fixture_id", {
-    method: "POST",
-    headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-    body: JSON.stringify(final.slice(i, i + 200))
-  });
-}
-console.log(`\n${final.length} predictions written.`);
