@@ -104,11 +104,13 @@ football-data.org's free tier only serves the current season. Past seasons come 
 [football-data.co.uk](https://www.football-data.co.uk) instead — a different site, free CSVs
 per season back to 1993, with date, kick-off time and full-time result. No key needed.
 
-```bash
-node scripts/backfill-fixtures.mjs 2022 2023 2024 2025
-```
+Run it from the repo: **Actions -> Backfill past seasons -> Run workflow**, seasons space
+separated. It defaults to a dry run, so the first click reports what it *would* write and
+touches nothing; untick that and run again to commit it. Keeping it in Actions means the
+service key never has to leave the repo secrets.
 
-Add `--dry-run` to see what it would write without touching the database. Ids are derived
+There is a local path too if you prefer — `node scripts/backfill-fixtures.mjs 2022 2023 2024
+2025 --dry-run` — but it needs `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` in your shell. Ids are derived
 from season + date + teams, so re-running updates rather than duplicates. Kick-off times are
 converted from UK local to UTC with British Summer Time handled. Matchday isn't in the CSV
 so it's inferred from each club's game count — approximate, and only used to group the

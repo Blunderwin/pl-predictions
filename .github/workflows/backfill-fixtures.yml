@@ -1,0 +1,30 @@
+name: Backfill past seasons
+
+# Manual only. Pulls whole past seasons from football-data.co.uk into
+# pl_fixtures. Lives here rather than being run locally so the service
+# key never has to leave the repo secrets.
+
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: "Season start years, space separated (2022 means 2022/23)"
+        required: true
+        default: "2022 2023 2024 2025"
+      dry_run:
+        description: "Report what would be written without touching the database"
+        type: boolean
+        default: true
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: node scripts/backfill-fixtures.mjs ${{ inputs.seasons }} ${{ inputs.dry_run && '--dry-run' || '' }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
