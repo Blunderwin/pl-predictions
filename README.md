@@ -123,16 +123,40 @@ From the spreadsheet: stage the rows, check what didn't match, then write. See
 row that would be silently dropped, and a strike-rate sanity check. A season of H/A/D calls
 should land somewhere near 40-55%; well outside that means the rows are misaligned.
 
-From the WhatsApp history instead, if the spreadsheet has gaps:
+From the chat history, which is where the actual picks live:
 
 ```bash
-node scripts/import-whatsapp.mjs chat.txt
+node scripts/import-chat.mjs "Predictions prexmas 2024.txt" _chat.txt --seasons 2021,2022,2023,2024,2025 --map map.json
 ```
 
-Export the chat without media first. It maps each message's string onto the fixtures that
-were open at that timestamp — the same operation the app does live — and writes a TSV report
-rather than touching the database. `--write` once the report reads correctly. It flags
-laughter ("hahaha" is a legal five-match call) and lone letters for a manual look.
+Two sources, treated as one continuous record — Snapchat from August 2021 to 22 December
+2024, WhatsApp from the 25th. Format is detected per file. `map.json` translates chat names
+to player names, including Snapchat's `"Me"`.
+
+It writes three files and touches nothing:
+
+| File | What it's for |
+|---|---|
+| `chat-import-report.tsv` | Every pick, the fixture it mapped to, and whether it was right |
+| `chat-import-report-by-matchday.tsv` | Per player per matchday totals — **diff this against the spreadsheet** |
+| `chat-import-report.sql` | Paste into the Supabase SQL editor to load it |
+
+The SQL exists so the load goes through an already-authenticated surface rather than needing
+the service key in a shell. It matches players by name and is re-runnable.
+
+Read the strike rates it prints before loading anything. H/A/D calls land near 40–55%; a
+player well outside that has misaligned strings, not bad luck.
+
+Four rules the real exports forced, each of which would otherwise have corrupted a season:
+
+- **Only whole messages count.** "Toby sent me this / HHAHHAA" is one person relaying
+  another's calls. Picking strings out of mixed messages attributes them to the wrong
+  player. Costs about 1% of messages and removes the entire class of error.
+- **Case separates calls from laughter.** Of 515 candidates in the WhatsApp export, 509 were
+  full caps and five of the six that weren't were "Hahahaha".
+- **Off-season messages are another competition.** In June 2026 the group predicted the World
+  Cup. Mapping those onto the next Premier League fixtures would be worse than no data.
+- **A gameweek is ten matches**, so anything longer is celebration.
 
 ---
 
