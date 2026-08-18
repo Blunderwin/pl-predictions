@@ -556,10 +556,8 @@ function viewPredict(){
   const all = openFixtures();
   if(!all.length){
     return `<section class="panel"><h2>Predict</h2>
-      <div class="empty">${state.fixtures.length
-        ? "Nothing left to call — every remaining fixture has kicked off."
-        : "No fixtures loaded yet. Run the sync action and pull to refresh."}</div>
-      ${refreshRow()}</section>`;
+      <div class="empty">${state.fixtures.length ? "Nothing to call." : "No fixtures loaded yet."}</div>
+      ${dataState()}${refreshRow()}</section>`;
   }
 
   const horizon = Date.now() + FORTNIGHT;
@@ -602,6 +600,22 @@ function viewPredict(){
     </div>` : ""}
     ${refreshRow()}
   </section>`;
+}
+
+// Shown whenever there's nothing to predict: says what is actually on
+// file, so "no upcoming fixtures" can't be mistaken for "all played".
+function dataState(){
+  const fx = state.fixtures;
+  if(!fx.length) return `<div class="sub" style="text-align:center">Run the sync workflow, then refresh.</div>`;
+  const future = fx.filter(f=> !kicked(f));
+  const last = fx[fx.length-1];
+  const seasons = [...new Set(fx.map(f=>f.season))].sort();
+  return `<div class="sub" style="text-align:center;line-height:1.7">
+    ${fx.length} fixtures on file across ${seasons.join(", ")}.<br>
+    ${future.length} still to kick off${future.length ? ` — next is ${esc(future[0].homeShort)} v ${esc(future[0].awayShort)}, ${esc(fmtDay(future[0].kickoff))} ${esc(fmtTime(future[0].kickoff))}` : ""}.<br>
+    Latest kick-off stored: ${esc(fmtDay(last.kickoff))} ${esc(fmtTime(last.kickoff))}.<br>
+    This device thinks it is ${esc(fmtDay(new Date().toISOString()))} ${esc(fmtTime(new Date().toISOString()))}.
+  </div>`;
 }
 
 function refreshRow(){
@@ -726,9 +740,15 @@ async function sendPicks(rows){
     console.warn("sendPicks failed:", e);
     live.forEach(r=> delete state.pending[r.fixture.id]);
     LS.set(K.pending, JSON.stringify(state.pending));
-    toast(String(e).includes("42501") || String(e).includes("row-level")
-      ? "Too late — that one's kicked off."
-      : "Couldn't save. Check your connection.", true);
+    const msg = String(e);
+    const rls = msg.includes("42501") || msg.includes("row-level");
+    const late = rls && live.some(r=> !open(r.fixture));
+    toast(late ? "Too late — that one's kicked off."
+        : rls ? "The database refused that write. Check the Predict tab's fixture summary."
+        : "Couldn't save. Check your connection.", true);
+    if(rls) console.warn("RLS rejection. Server clock vs fixture:",
+      live.map(r=>({fixture:`${r.fixture.homeShort} v ${r.fixture.awayShort}`,
+                    kickoff:r.fixture.kickoff, status:r.fixture.status, deviceNow:new Date().toISOString()})));
     return false;
   }
 }
