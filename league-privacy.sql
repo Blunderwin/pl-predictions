@@ -32,11 +32,17 @@ begin
     raise exception 'wrong code' using errcode = 'P0003';
   end if;
 
+  -- Every column reference is qualified. The OUT parameters are called
+  -- league_id and player_id, so an unqualified mention of either inside
+  -- the body is ambiguous and raises 42702 at runtime — which the app
+  -- caught and turned into "you're in no leagues".
   return query
     select l.id, l.name, l.starts_on, l.sort, m.player_id
       from pl_leagues l
       join pl_league_members m on m.league_id = l.id
-     where l.id in (select league_id from pl_league_members where player_id = p_player)
+     where l.id in (select mine.league_id
+                      from pl_league_members mine
+                     where mine.player_id = p_player)
      order by l.sort, l.name;
 end;
 $fn$;
@@ -70,7 +76,19 @@ grant execute on function pl_all_leagues(uuid, text) to anon, authenticated;
 
 
 -- ---------- Check ----------
--- Should list only the leagues that player belongs to.
+-- What each player will actually see. Run this after the functions
+-- above; if someone's list looks short, the membership is wrong rather
+-- than the app.
+select p.name as player,
+       count(distinct m.league_id) as leagues,
+       string_agg(distinct l.name, ', ' order by l.name) as sees
+  from pl_players p
+  left join pl_league_members m on m.player_id = p.id
+  left join pl_leagues l        on l.id = m.league_id
+ group by p.name
+ order by p.name;
+
+-- And the function itself, for one player, end to end:
 --   select distinct name, starts_on from pl_my_leagues(
 --     (select id from pl_players where name = 'Ben'),
 --     (select pin from pl_players where name = 'Ben'));

@@ -632,7 +632,8 @@ async function refresh(quiet){
       (state.me && state.pin)
         ? SB.rpc(state.isAdmin ? "pl_all_leagues" : "pl_my_leagues",
             state.isAdmin ? { p_admin:state.me, p_admin_pin:state.pin }
-                          : { p_player:state.me, p_pin:state.pin }).catch(()=>[])
+                          : { p_player:state.me, p_pin:state.pin })
+            .catch(e => { console.warn("leagues failed:", e); return null; })
         : []
     ]);
     state.players  = players;
@@ -642,12 +643,18 @@ async function refresh(quiet){
     if(own) state.myPicks = Object.fromEntries(own.map(r => [r.fixture_id, r.pick]));
     // One row per (league, member); fold it back into the two shapes
     // the rest of the app expects.
-    const rows = leagueRows || [];
-    const seen = new Map();
-    rows.forEach(r => seen.has(r.league_id) || seen.set(r.league_id,
-      { id:r.league_id, name:r.name, starts_on:r.starts_on, sort:r.sort }));
-    state.leagues = [...seen.values()].sort((a,b)=> a.sort - b.sort || a.name.localeCompare(b.name));
-    state.members = rows.filter(r => r.player_id).map(r => ({ league_id:r.league_id, player_id:r.player_id }));
+    // null means the call failed; keep whatever we already had rather
+    // than silently reporting that you belong to nothing.
+    const rows = leagueRows;
+    if(rows === null){
+      toast("Couldn't load your leagues.", true);
+    }else{
+      const seen = new Map();
+      rows.forEach(r => seen.has(r.league_id) || seen.set(r.league_id,
+        { id:r.league_id, name:r.name, starts_on:r.starts_on, sort:r.sort }));
+      state.leagues = [...seen.values()].sort((a,b)=> a.sort - b.sort || a.name.localeCompare(b.name));
+      state.members = rows.filter(r => r.player_id).map(r => ({ league_id:r.league_id, player_id:r.player_id }));
+    }
     pickLeague();
     pickSeason();
     refreshInitials();
@@ -657,8 +664,10 @@ async function refresh(quiet){
     LS.set(K.picks,    JSON.stringify([...state.picks]));
     LS.set(K.history,  JSON.stringify(state.history));
     LS.set(K.mine,     JSON.stringify(state.myPicks));
-    LS.set(K.leagues,  JSON.stringify(state.leagues));
-    LS.set(K.members,  JSON.stringify(state.members));
+    if(rows !== null){
+      LS.set(K.leagues, JSON.stringify(state.leagues));
+      LS.set(K.members, JSON.stringify(state.members));
+    }
     $("#storeBadge").textContent = "Live · " + (state.season || "no fixtures");
   }catch(e){
     console.warn("Refresh failed — using cache:", e);
