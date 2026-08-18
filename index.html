@@ -742,17 +742,17 @@ async function sendPicks(rows){
       p_player: state.me,
       p_picks: live.map(r=>({ fixture_id: r.fixture.id, pick: r.pick }))
     }) || [];
-    const refused = verdicts.filter(v=> !v.accepted);
-    verdicts.filter(v=> v.accepted).forEach(v=>
-      state.picks.set(pickKey(state.me, v.fixture_id), {pick:null, revealed:false}));
-    refused.forEach(v=> delete state.pending[v.fixture_id]);
+    const refused = verdicts.filter(v=> !v.ok);
+    verdicts.filter(v=> v.ok).forEach(v=>
+      state.picks.set(pickKey(state.me, v.fid), {pick:null, revealed:false}));
+    refused.forEach(v=> delete state.pending[v.fid]);
     LS.set(K.pending, JSON.stringify(state.pending));
     LS.set(K.picks, JSON.stringify([...state.picks]));
     if(refused.length){
-      const f = state.fixtures.find(x=> String(x.id)===String(refused[0].fixture_id));
+      const f = state.fixtures.find(x=> String(x.id)===String(refused[0].fid));
       toast(refused.length === 1 && f
-        ? `${f.homeShort} v ${f.awayShort}: ${refused[0].reason}.`
-        : `${refused.length} refused — ${refused[0].reason}.`, true);
+        ? `${f.homeShort} v ${f.awayShort}: ${refused[0].why}.`
+        : `${refused.length} refused — ${refused[0].why}.`, true);
     }
     return refused.length < live.length;
   }catch(e){

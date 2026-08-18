@@ -90,30 +90,46 @@ $$;
 -- policy, which fails in ways that are hard to read.
 revoke insert, update, delete on pl_predictions from anon, authenticated;
 
-create or replace function pl_predict_batch(p_player uuid, p_picks jsonb)
-returns table (fixture_id bigint, accepted boolean, reason text)
+-- Output names must not collide with any column the body touches:
+-- inside PL/pgSQL an OUT parameter called fixture_id is indistinguishable
+-- from pl_predictions.fixture_id in the ON CONFLICT target (42702).
+-- Return type changes, so this drops rather than replaces.
+drop function if exists pl_predict_batch(uuid, jsonb);
+
+create function pl_predict_batch(p_player uuid, p_picks jsonb)
+returns table (fid bigint, ok boolean, why text)
 language plpgsql security definer set search_path = public as $fn$
-declare item jsonb; fid bigint; pk text;
+declare
+  v_item jsonb;
+  v_fid  bigint;
+  v_pick text;
 begin
   if not exists (select 1 from pl_players where id = p_player) then
     raise exception 'unknown player %', p_player using errcode = 'P0002';
   end if;
-  for item in select * from jsonb_array_elements(p_picks) loop
-    fid := (item->>'fixture_id')::bigint;
-    pk  := upper(item->>'pick');
-    if pk not in ('H','A','D') then
-      fixture_id := fid; accepted := false; reason := 'not H, A or D'; return next; continue;
+
+  for v_item in select * from jsonb_array_elements(p_picks) loop
+    v_fid  := (v_item->>'fixture_id')::bigint;
+    v_pick := upper(v_item->>'pick');
+
+    if v_pick is null or v_pick not in ('H','A','D') then
+      fid := v_fid; ok := false; why := 'not H, A or D'; return next; continue;
     end if;
-    if not exists (select 1 from pl_fixtures where id = fid) then
-      fixture_id := fid; accepted := false; reason := 'no such fixture'; return next; continue;
+
+    if not exists (select 1 from pl_fixtures where id = v_fid) then
+      fid := v_fid; ok := false; why := 'no such fixture'; return next; continue;
     end if;
-    if not pl_still_open(fid) then
-      fixture_id := fid; accepted := false; reason := 'kicked off'; return next; continue;
+
+    if not pl_still_open(v_fid) then
+      fid := v_fid; ok := false; why := 'kicked off'; return next; continue;
     end if;
+
     insert into pl_predictions (player_id, fixture_id, pick)
-    values (p_player, fid, pk::char(1))
-    on conflict (player_id, fixture_id) do update set pick = excluded.pick, updated_at = now();
-    fixture_id := fid; accepted := true; reason := null; return next;
+    values (p_player, v_fid, v_pick::char(1))
+    on conflict (player_id, fixture_id)
+      do update set pick = excluded.pick, updated_at = now();
+
+    fid := v_fid; ok := true; why := null; return next;
   end loop;
 end;
 $fn$;
