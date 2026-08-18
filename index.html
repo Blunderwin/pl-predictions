@@ -416,6 +416,7 @@ const state = {
   newPlayer: null,             // {name, pin} just created, held so a re-render keeps it on screen
   rosterCodes: null,           // admin's code list, same reason
   season: null,                // active season label
+  seasonChosen: false,         // true once the user picks one by hand
   bulk: "",                    // raw text in the bulk box
   showAll: false,              // predict view: every open fixture vs the next fortnight
   resultsMd: null,             // matchday shown in Results
@@ -444,11 +445,25 @@ function hydrateFromCache(){
   pickSeason();
 }
 
-function allSeasons(){ return [...new Set(state.fixtures.map(f=>f.season))].sort().reverse(); }
+function allSeasons(){
+  const all = new Set(state.fixtures.map(f=>f.season));
+  state.history.forEach(h=> all.add(h.season));
+  return [...all].sort().reverse();
+}
+// A season with no results yet has nothing for the retrospective
+// views, so defaulting to the newest one leaves the Table and Stats
+// looking broken on the day a season starts. Default to the newest
+// season that actually has something in it; the live season takes
+// over by itself once its first results land.
+function seasonsWithData(){
+  const has = new Set(state.fixtures.filter(SETTLED).map(f=>f.season));
+  state.history.forEach(h=> has.add(h.season));
+  return [...has].sort().reverse();
+}
 function pickSeason(){
   const seasons = allSeasons();
-  if(state.season && seasons.includes(state.season)) return;   // keep an explicit choice
-  state.season = seasons[0] || null;
+  if(state.seasonChosen && (state.season === ALL_TIME || seasons.includes(state.season))) return;
+  state.season = seasonsWithData().length ? ALL_TIME : (seasons[0] || null);
 }
 
 // Shown on every retrospective view once there's more than one season
@@ -456,8 +471,11 @@ function pickSeason(){
 function seasonSeg(){
   const seasons = allSeasons();
   if(seasons.length < 2) return "";
-  return `<div class="seg">${seasons.map(s=>
-    `<button class="btn sm ghost segbtn" data-season="${esc(s)}" aria-pressed="${s===state.season}">${esc(s)}</button>`).join("")}</div>`;
+  return `<div class="seg">
+    <button class="btn sm ghost segbtn" data-season="${ALL_TIME}" aria-pressed="${allTime()}">All time</button>
+    ${seasons.map(s=>
+      `<button class="btn sm ghost segbtn" data-season="${esc(s)}" aria-pressed="${s===state.season}">${esc(s)}</button>`).join("")}
+  </div>`;
 }
 
 async function refresh(quiet){
@@ -897,7 +915,8 @@ async function sendPicks(rows){
 
 function wireCommon(){
   $$(".segbtn[data-season]").forEach(b=> b.onclick = ()=>{
-    state.season = b.dataset.season; state.resultsMd = null; state.statPlayer = null; render();
+    state.season = b.dataset.season; state.seasonChosen = true;
+    state.resultsMd = null; state.statPlayer = null; render();
   });
   $("#refreshBtn") && ($("#refreshBtn").onclick = ()=> refresh(false));
   $("#copyBtn") && ($("#copyBtn").onclick = ()=>{
@@ -911,7 +930,11 @@ function wireCommon(){
 /* ---------------------------------------------------------------
    8. SCORING
    --------------------------------------------------------------- */
-function seasonFixtures(){ return state.fixtures.filter(f=> !state.season || f.season===state.season); }
+const ALL_TIME = "*";
+const allTime = () => state.season === ALL_TIME;
+function seasonFixtures(){
+  return allTime() ? state.fixtures : state.fixtures.filter(f=> !state.season || f.season===state.season);
+}
 function settledFixtures(){ return seasonFixtures().filter(SETTLED); }
 
 /* The group kept a spreadsheet from 2020 onward and it is correct. The
@@ -929,13 +952,16 @@ function settledFixtures(){ return seasonFixtures().filter(SETTLED); }
    For the live season there's no spreadsheet, the app recorded every
    pick itself, and both tiers are the same thing. */
 function historyFor(season){
-  return state.history.filter(h => h.season === season);
+  return season === ALL_TIME ? state.history : state.history.filter(h => h.season === season);
 }
 function verifiedDaysFor(season){
   const set = new Set();
   historyFor(season).forEach(h => { if(h.verified) set.add(h.player_id + "|" + h.played_on); });
   return set;
 }
+// Seasons the spreadsheet covers. Anything outside them — the live one
+// — is scored from the app's own record instead, which is complete.
+function seasonsWithHistory(){ return new Set(state.history.map(h => h.season)); }
 const dayOf = f => new Date(f.kickoff).toISOString().slice(0,10);
 
 // Every derived number in the app comes off this one pass, so the
@@ -945,10 +971,15 @@ function computeSeason(){
   const hist = historyFor(state.season);
   const verified = verifiedDaysFor(state.season);
   const hasHistory = hist.length > 0;
+  // All-time spans both worlds: the spreadsheet covers the finished
+  // seasons, the app's own record covers the live one. Which applies
+  // is a property of the fixture's season, not of the view.
+  const histSeasons = seasonsWithHistory();
   const players = state.players.map(p=>({
     id:p.id, name:p.name,
     played:0, correct:0, missed:0, untrusted:0,
     points:0, scored:0, dayWins:0, hasTruth:false,
+    livePoints:0, liveScored:0,
     byPick:{H:{n:0,ok:0},A:{n:0,ok:0},D:{n:0,ok:0}},
     bestStreak:0, curStreak:0, _run:0,
     solo:0, blind:0, withHerd:0, herdN:0,
@@ -975,23 +1006,34 @@ function computeSeason(){
   fixtures.forEach(f=>{
     actual[f.result]++;
     const ko = new Date(f.kickoff).getTime();
+    const day = dayOf(f);
+    const fromSheet = histSeasons.has(f.season);
+    const trusts = p => !fromSheet || verified.has(p.id + "|" + day);
+
     const calls = players.map(p=>({p, pick: revealedPick(p.id, f.id)})).filter(x=>x.pick);
-    const tally = {H:0,A:0,D:0}; calls.forEach(c=> tally[c.pick]++);
+    // Comparing yourself to the room only means anything when the whole
+    // room is known. With a ~93% reconstruction, most fixtures are
+    // missing somebody, and counting those would measure who happened
+    // to be recovered rather than who was actually alone.
+    const room = calls.filter(c => trusts(c.p));
+    const fullRoom = room.length === players.length;
+    const tally = {H:0,A:0,D:0}; room.forEach(c=> tally[c.pick]++);
     const top = Math.max(tally.H, tally.A, tally.D);
     const modal = PICKS.filter(x=>tally[x]===top);
-    const rightCount = calls.filter(c=>c.pick===f.result).length;
+    const rightCount = room.filter(c=>c.pick===f.result).length;
     md.add(f.matchday);
-
-    const day = dayOf(f);
     players.forEach(p=>{
       const call = calls.find(c=>c.p===p);
-      // On a historic season, only days proven against the spreadsheet
-      // may inform how someone predicts.
-      const trust = !hasHistory || verified.has(p.id + "|" + day);
+      // Where the spreadsheet covers the season, only days proven
+      // against it may inform how someone predicts. Where it doesn't,
+      // the app recorded every pick itself and all of them count.
+      const trust = trusts(p);
       if(!call){
-        if(!hasHistory && p.firstAt !== null && ko >= p.firstAt) p.missed++;
+        if(!fromSheet && p.firstAt !== null && ko >= p.firstAt) p.missed++;
+        if(!fromSheet) p.liveScored++;
         return;
       }
+      if(!fromSheet){ p.liveScored++; if(call.pick === f.result) p.livePoints++; }
       if(!trust){ p.untrusted++; return; }
       const hit = call.pick === f.result;
       p.played++;
@@ -999,9 +1041,11 @@ function computeSeason(){
       if(hit){ p.byPick[call.pick].ok++; p.correct++; p._run++; p.bestStreak = Math.max(p.bestStreak, p._run); }
       else p._run = 0;
       p.form.push(hit);
-      if(hit && rightCount===1 && calls.length>1) p.solo++;
-      if(!hit && rightCount===calls.length-1 && calls.length>1) p.blind++;
-      if(calls.length>1){ p.herdN++; if(modal.includes(call.pick)) p.withHerd++; }
+      if(fullRoom){
+        if(hit && rightCount===1) p.solo++;
+        if(!hit && rightCount===room.length-1) p.blind++;
+        p.herdN++; if(modal.includes(call.pick)) p.withHerd++;
+      }
 
       const m = p.byMd[f.matchday] || (p.byMd[f.matchday] = {n:0, ok:0});
       m.n++; if(hit) m.ok++;
@@ -1011,27 +1055,22 @@ function computeSeason(){
       });
     });
 
-    if(calls.length >= 2) drama.push({fixture:f, calls, right:rightCount});
+    if(fullRoom && room.length >= 2) drama.push({fixture:f, calls:room, right:rightCount});
   });
 
   players.forEach(p=>{
     p.curStreak = p._run;
     p.form = p.form.slice(-6);
-    // Points and accuracy come off the spreadsheet when there is one.
+    // Points are the spreadsheet's where it covers the season, and the
+    // app's own record where it doesn't. Adding the two is the only way
+    // an all-time total is both complete and exact.
     const mine = hist.filter(x => x.player_id === p.id);
-    if(mine.length){
-      p.hasTruth = true;
-      p.points = mine.reduce((n,x)=> n + x.correct, 0);
-      p.scored = mine.reduce((n,x)=> n + x.matches, 0);
-      p.verifiedDays = mine.filter(x=>x.verified).length;
-      p.totalDays = mine.length;
-      p.recoveredPicks = mine.reduce((n,x)=> n + x.recovered, 0);
-    }else{
-      p.points = p.correct;
-      p.scored = p.played;
-      p.verifiedDays = p.totalDays = 0;
-      p.recoveredPicks = p.played;
-    }
+    p.hasTruth = mine.length > 0;
+    p.points = mine.reduce((n,x)=> n + x.correct, 0) + p.livePoints;
+    p.scored = mine.reduce((n,x)=> n + x.matches, 0) + p.liveScored;
+    p.verifiedDays = mine.filter(x=>x.verified).length;
+    p.totalDays = mine.length;
+    p.recoveredPicks = mine.reduce((n,x)=> n + x.recovered, 0) + (p.hasTruth ? 0 : p.played);
     p.acc = pct(p.points, p.scored);          // strike rate over everything that was playable
     p.pickAcc = pct(p.correct, p.played);     // strike rate over the picks we can actually see
   });
@@ -1107,7 +1146,9 @@ function viewTable(){
   const s = computeSeason();
   if(!s.fixtureCount && !s.hasHistory){
     return `<section class="panel"><h2>Table</h2>
-      <div class="empty">Nothing settled yet. The table fills in as results land.</div>${refreshRow()}</section>`;
+      <div class="sub">Nothing settled in ${esc(state.season||"this season")} yet.</div>
+      ${seasonSeg()}
+      <div class="empty">The table fills in as results land.</div>${refreshRow()}</section>`;
   }
   const wins = matchdayWinners(s);
   const mdWins = {};
@@ -1130,7 +1171,7 @@ function viewTable(){
 
   const leader = s.players[0];
   const chase = s.players[1];
-  const gap = leader && chase ? leader.correct - chase.correct : 0;
+  const gap = leader && chase ? leader.points - chase.points : 0;
 
   const chart = cumulativeChart(s);
   // Would you have done better just backing the home side every week?
@@ -1138,12 +1179,12 @@ function viewTable(){
 
   return `<section class="panel">
     <h2>Table</h2>
-    <div class="sub">${s.hasHistory ? `${s.total} matches scored` : `${s.fixtureCount} match${s.fixtureCount===1?"":"es"} settled`}</div>
+    <div class="sub">${allTime() ? "All time · " : ""}${s.hasHistory ? `${s.total} matches scored` : `${s.fixtureCount} match${s.fixtureCount===1?"":"es"} settled`}</div>
     ${seasonSeg()}
     <div class="keys" style="margin-top:14px">
-      <div class="key"><div class="big">${leader ? esc(leader.correct) : 0}</div><div class="lbl">Top score · ${esc(leader?.name||"")}</div></div>
+      <div class="key"><div class="big">${leader ? leader.points : 0}</div><div class="lbl">Top score · ${esc(leader?.name||"")}</div></div>
       <div class="key"><div class="big">${gap}</div><div class="lbl">Lead over ${esc(chase?.name||"the pack")}</div></div>
-      <div class="key"><div class="big">${pct(s.actual.H, s.fixtureCount)}%</div><div class="lbl">Home wins this season</div></div>
+      <div class="key"><div class="big">${pct(s.actual.H, s.fixtureCount)}%</div><div class="lbl">Home wins${allTime()?" all time":" this season"}</div></div>
       <div class="key"><div class="big">${beat}/${s.players.length}</div><div class="lbl">Beating "always home"</div></div>
     </div>
     <div class="scroller" style="margin-top:8px">
@@ -1173,8 +1214,12 @@ function coverageBar(p){
 }
 
 function viewResults(){
-  const fx = seasonFixtures().filter(f=> kicked(f) && !VOID(f));
-  if(!fx.length) return `<section class="panel"><h2>Results</h2><div class="empty">No matches played yet.</div>${refreshRow()}</section>`;
+  const scope = allTime() ? (seasonsWithData()[0] || state.season) : state.season;
+  const fx = state.fixtures.filter(f=> f.season === scope && kicked(f) && !VOID(f));
+  if(!fx.length) return `<section class="panel"><h2>Results</h2>
+    <div class="sub">Nothing played in ${esc(state.season||"this season")} yet.</div>
+    ${seasonSeg()}
+    <div class="empty">Pick an earlier season, or wait for kick-off.</div>${refreshRow()}</section>`;
 
   const mds = [...new Set(fx.map(f=>f.matchday))].sort((a,b)=>b-a);
   const md = state.resultsMd != null && mds.includes(state.resultsMd) ? state.resultsMd : mds[0];
@@ -1207,7 +1252,8 @@ function viewResults(){
 
   return `<section class="panel">
     <h2>Results</h2>
-    <div class="sub">Everyone&rsquo;s calls, revealed at kick-off.</div>
+    <div class="sub">Everyone&rsquo;s calls, revealed at kick-off.${
+      allTime() ? ` Showing ${esc(scope)} — pick a season to change it.` : ""}</div>
     ${seasonSeg()}
     ${seg}
     <div class="scroller" style="margin-top:10px">
@@ -1273,7 +1319,7 @@ function cumulativeChart(s){
     <text x="${W-padR}" y="${H-6}" text-anchor="end" font-family="Space Mono" font-size="9.5" style="fill:var(--ash)">${esc(ends[1])}</text>`;
   const legend = withData.map((p,i)=>
     `<span><b style="background:${SWATCH[i%SWATCH.length]}"></b>${esc(p.name)}</span>`).join("");
-  return `<div class="chart-card"><div class="ctitle">Points through the season</div>
+  return `<div class="chart-card"><div class="ctitle">${allTime()?"Points, all time":"Points through the season"}</div>
     <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="cumulative points">
       ${grid}${lines}${xlab}
     </svg><div class="legend">${legend}</div></div>`;
@@ -1286,7 +1332,9 @@ function viewStats(){
   const s = computeSeason();
   if(!s.fixtureCount && !s.hasHistory){
     return `<section class="panel"><h2>Stats</h2>
-      <div class="empty">Nothing to pick over yet. Come back after a matchday.</div>${refreshRow()}</section>`;
+      <div class="sub">Nothing settled in ${esc(state.season||"this season")} yet.</div>
+      ${seasonSeg()}
+      <div class="empty">Come back after a matchday, or pick an earlier season.</div>${refreshRow()}</section>`;
   }
   if(state.statPlayer){
     const p = s.players.find(x=>x.id===state.statPlayer);
@@ -1320,7 +1368,7 @@ function viewStats(){
     `<div class="key"><div class="big">${pct(s.actual.H,s.fixtureCount)}/${pct(s.actual.D,s.fixtureCount)}/${pct(s.actual.A,s.fixtureCount)}</div><div class="lbl">Actual H / D / A split</div></div>`,
     `<div class="key"><div class="big">${gimme}</div><div class="lbl">Matches nobody got wrong</div></div>`,
     banana ? `<div class="key"><div class="big">0/${banana.calls.length}</div><div class="lbl">Banana skin · ${esc(banana.fixture.homeShort)} v ${esc(banana.fixture.awayShort)} (${banana.fixture.result})</div></div>` : "",
-    bestMd ? `<div class="key"><div class="big">${bestMd.ok}/${bestMd.n}</div><div class="lbl">Best matchday · ${esc(bestMd.p.name)}, MD${bestMd.md}</div></div>` : ""
+    (bestMd && !allTime()) ? `<div class="key"><div class="big">${bestMd.ok}/${bestMd.n}</div><div class="lbl">Best matchday · ${esc(bestMd.p.name)}, MD${bestMd.md}</div></div>` : ""
   ].join("");
 
   const A = [];
@@ -1407,7 +1455,7 @@ function coverageNote(s){
   return `<div class="chart-card" style="margin-top:12px">
     <div class="ctitle">What these are built on</div>
     <div class="sub" style="margin:0 0 10px">
-      Points and the table come from the group's spreadsheet and are exact.
+      Points and the table come from the group's spreadsheet${allTime()?", plus the app's own record for the live season,":""} and are exact.
       Everything below reads individual calls rebuilt from the chat history, and only from the
       <b>${days} of ${all}</b> player-days that reconciled against the spreadsheet exactly
       — <b>${seen}</b> calls in all. Days where the record is incomplete are left out rather
