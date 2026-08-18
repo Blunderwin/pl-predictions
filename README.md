@@ -273,8 +273,13 @@ Membership is managed from your account panel: tap a name under a league to add 
 them. Only an admin sees those controls, and `pl_league_set_member` re-checks the admin flag
 server-side, so hiding the buttons isn't what's doing the work.
 
-The league selector appears on Table, Results and Stats, and scopes the marker row, the week
-tally and the 12-hour nudge on Predict. *Everyone* ignores membership entirely.
+The league selector appears on all four tabs. It never changes which fixtures you see — every
+Premier League match is there regardless — but it decides who you're measured against: the
+initials in the marker row, the week tally, who the 12-hour nudge names, and the whole of
+Table, Results and Stats. *Everyone* ignores membership entirely.
+
+It defaults to the first league by sort order that you're a member of, which is OG
+Predictions. The choice sticks to the device.
 
 ## Two tiers of truth
 
