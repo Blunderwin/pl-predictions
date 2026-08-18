@@ -1,0 +1,27 @@
+name: Sync PL fixtures
+
+on:
+  schedule:
+    # Every 3 hours. Kick-off times are set ~5 weeks out so this is
+    # mostly about picking up results on the evening they happen.
+    - cron: "17 */3 * * *"
+  workflow_dispatch:
+    inputs:
+      season:
+        description: "Season start year (e.g. 2026 for 2026/27). Blank = current."
+        required: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: node scripts/sync-fixtures.mjs
+        env:
+          FOOTBALL_DATA_TOKEN: ${{ secrets.FOOTBALL_DATA_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          PL_SEASON: ${{ inputs.season }}
