@@ -59,8 +59,27 @@ open the page, add the players, and go.
 
 ### 6. Home screen
 
-Open the Pages URL on your phone and *Add to Home Screen*. It runs standalone, dark, no
-browser chrome.
+**iOS** — open the Pages URL in *Safari* (this only works in Safari), tap Share, scroll down,
+*Add to Home Screen*.
+**Android** — open it in Chrome, three-dot menu, *Install app* or *Add to Home screen*.
+
+It launches standalone with no browser chrome, because `manifest.json` sets
+`display: standalone`. Two things in there are easy to get wrong and worth leaving alone:
+
+- Every path in the manifest is **relative** (`"./"`, `"./icon-192.png"`). Manifest URLs
+  resolve against the manifest's own location, so this works under
+  `username.github.io/pl-predictions/` without the repo name appearing anywhere. Absolute
+  paths like `/` would 404 on a project page.
+- **iOS ignores the manifest's icons** and reads `<link rel="apple-touch-icon">`, which is
+  why `apple-touch-icon.png` exists separately. Without it you get a screenshot of the page
+  as your icon.
+
+To change the icon, edit the colours in `scripts/make-icons.mjs` and run it. It writes the
+PNGs directly — no image library needed.
+
+There's no service worker, so it needs a connection to start. The last-seen fixtures, picks
+and history are mirrored to localStorage, so a cold launch on a bad signal shows the previous
+state rather than an empty page, but predictions still need the network to save.
 
 ---
 

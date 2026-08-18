@@ -5,11 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <title>Premier League Predictions</title>
 <meta name="description" content="H, A or D before kick-off. Predictions, results and a season's worth of arguing, for a group of friends." />
-<meta name="theme-color" content="#0a1020" />
+<meta name="theme-color" content="#0b0d10" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Predictions" />
-<link rel="manifest" href="data:application/manifest+json,%7B%22name%22%3A%22Premier%20League%20Predictions%22%2C%22short_name%22%3A%22Predictions%22%2C%22display%22%3A%22standalone%22%2C%22background_color%22%3A%22%230a1020%22%2C%22theme_color%22%3A%22%230a1020%22%2C%22start_url%22%3A%22.%22%7D" />
+<!-- Relative paths throughout: the manifest's URLs resolve against the
+     manifest itself, so this works under /pl-predictions/ without the
+     repo name being written down anywhere. iOS ignores the manifest's
+     icons and uses apple-touch-icon, hence both. -->
+<link rel="manifest" href="manifest.json" />
+<link rel="apple-touch-icon" href="apple-touch-icon.png" />
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
