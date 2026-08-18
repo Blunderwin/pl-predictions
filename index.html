@@ -57,16 +57,22 @@
   input,select,textarea{font-family:inherit}
   a{color:var(--mark)}
 
-  .wrap{max-width:800px;margin:0 auto;padding:0 14px 56px}
+  /* env() is 0 in a browser tab and the real inset once installed to
+     the home screen, where the status bar sits over the page. */
+  .wrap{max-width:800px;margin:0 auto;
+    padding:calc(env(safe-area-inset-top) + 8px) 14px 56px}
 
   /* ---------- Masthead ---------- */
-  header.top{display:flex;align-items:flex-end;gap:12px;padding:18px 0 10px;border-bottom:2px solid var(--chalk)}
+  header.top{display:flex;align-items:flex-end;gap:10px;padding:12px 0 10px;border-bottom:2px solid var(--chalk)}
   header.top h1{font-size:27px;text-transform:uppercase;letter-spacing:.02em;line-height:1}
   header.top .sub{color:var(--ash);font-size:10.5px;letter-spacing:.22em;text-transform:uppercase;margin-bottom:3px}
-  .whoami{margin-left:auto}
+  .whoami{margin-left:auto;display:flex;align-items:center;gap:7px}
   .whoami button{background:transparent;border:1px solid var(--rule);color:var(--chalk);
     border-radius:var(--r);padding:6px 11px;font-size:13px;font-weight:500}
   .whoami button:hover{border-color:var(--ash)}
+  .whoami .sync{width:34px;padding:0;height:32px;display:grid;place-items:center;font-size:15px;line-height:1}
+  .whoami .sync.spin{color:var(--mark);animation:spin 1s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
 
   /* ---------- Tabs ---------- */
   nav.tabs{display:flex;gap:0;margin:0 0 18px;border-bottom:1px solid var(--rule)}
@@ -149,6 +155,12 @@
     min-width:15px;height:14px;padding:0 3px;display:inline-grid;place-items:center;
     border:1px solid var(--rule);border-radius:3px;color:#4d5560;background:transparent}
   .whodunnit span.in{border-color:var(--ok);color:#06180d;background:var(--ok);font-weight:700}
+  .whodunnit span.me{border-style:dashed}
+  .whodunnit span.in.me{border-style:solid}
+  .whoweek{display:flex;flex-wrap:wrap;gap:8px 14px;margin-top:12px;padding-top:10px;
+    border-top:1px solid var(--rule);font-size:12.5px;color:var(--ash)}
+  .tallyman{display:inline-flex;align-items:center;gap:6px}
+  .tallyman.done{color:var(--chalk)}
   .keymark{font-family:"Space Mono";font-size:9.5px;min-width:15px;height:14px;padding:0 3px;
     display:inline-grid;place-items:center;border:1px solid var(--rule);border-radius:3px;
     color:#4d5560;vertical-align:middle;margin-right:2px}
@@ -352,7 +364,7 @@ const LS = {
 };
 const K = { me:"pl_me", pin:"pl_pin", name:"pl_name", admin:"pl_admin", pending:"pl_pending",
             fixtures:"pl_cache_fixtures", players:"pl_cache_players", picks:"pl_cache_picks",
-            history:"pl_cache_history" };
+            history:"pl_cache_history", mine:"pl_cache_mine" };
 
 /* Dependency-free PostgREST client. Same shape as the whist app's
    adapter: reads fall back to the local mirror, writes go through
@@ -463,8 +475,8 @@ function pickKey(playerId, fixtureId){ return playerId + "|" + fixtureId; }
 function myPick(fixtureId){
   if(!state.me) return null;
   const served = state.picks.get(pickKey(state.me, fixtureId));
-  if(served && served.pick) return served.pick;
-  return state.pending[fixtureId] || (served ? "?" : null);
+  if(served && served.pick) return served.pick;             // revealed at kick-off
+  return state.pending[fixtureId] || state.myPicks[fixtureId] || (served ? "?" : null);
 }
 function hasPicked(playerId, fixtureId){
   if(state.picks.has(pickKey(playerId, fixtureId))) return true;
@@ -485,6 +497,7 @@ const state = {
   fixtures: [],                // sorted by kickoff
   picks: new Map(),            // "playerId|fixtureId" -> {pick|null, revealed}
   history: [],                 // authoritative per-day scores from the group's spreadsheet
+  myPicks: {},                 // fixtureId -> pick, mine only, readable because we hold the code
   pending: {},                 // fixtureId -> "H"|"A"|"D"  (mine, pre-kick-off, local only)
   me: null,                    // player id
   pin: null,                   // this device's four digits, sent with every write
@@ -521,6 +534,7 @@ function hydrateFromCache(){
   state.fixtures = LS.json(K.fixtures, []).map(f=>f).sort(byKickoff);
   state.picks    = new Map(LS.json(K.picks, []));
   state.history  = LS.json(K.history, []);
+  state.myPicks  = LS.json(K.mine, {});
   refreshInitials();
   pickSeason();
 }
@@ -561,16 +575,22 @@ function seasonSeg(){
 async function refresh(quiet){
   $("#storeBadge").textContent = "Syncing…";
   try{
-    const [players, fixtures, picks, history] = await Promise.all([
+    const [players, fixtures, picks, history, own] = await Promise.all([
       SB.get("pl_players_public?select=id,name&order=name.asc"),
       SB.get("pl_fixtures?select=*&order=kickoff_utc.asc,id.asc"),
       SB.get("pl_picks_public?select=player_id,fixture_id,pick,revealed&order=fixture_id.asc,player_id.asc"),
-      SB.get("pl_history?select=player_id,season,played_on,correct,matches,recovered,verified&order=season.asc,played_on.asc,player_id.asc").catch(()=>[])
+      SB.get("pl_history?select=player_id,season,played_on,correct,matches,recovered,verified&order=season.asc,played_on.asc,player_id.asc").catch(()=>[]),
+      // The public view hides every pick until kick-off, so our own
+      // come back separately, unlocked by the code this device holds.
+      (state.me && state.pin)
+        ? SB.rpc("pl_my_picks", { p_player:state.me, p_pin:state.pin }).catch(()=>null)
+        : null
     ]);
     state.players  = players;
     state.fixtures = fixtures.map(rowToFixture).sort(byKickoff);
     state.picks    = new Map(picks.map(p=>[pickKey(p.player_id,p.fixture_id), {pick:p.pick, revealed:p.revealed}]));
     state.history  = history || [];
+    if(own) state.myPicks = Object.fromEntries(own.map(r => [r.fixture_id, r.pick]));
     pickSeason();
     refreshInitials();
     prunePending();
@@ -578,6 +598,7 @@ async function refresh(quiet){
     LS.set(K.fixtures, JSON.stringify(state.fixtures));
     LS.set(K.picks,    JSON.stringify([...state.picks]));
     LS.set(K.history,  JSON.stringify(state.history));
+    LS.set(K.mine,     JSON.stringify(state.myPicks));
     $("#storeBadge").textContent = "Live · " + (state.season || "no fixtures");
   }catch(e){
     console.warn("Refresh failed — using cache:", e);
@@ -619,9 +640,15 @@ function render(){
 function refreshInitials(){ INITIALS = initialsFor(state.players.map(p=>p.name)); }
 
 function renderWhoami(){
-  $("#whoami").innerHTML = `<button id="meBtn" title="${state.me?"Account":"Sign in"}">${
+  $("#whoami").innerHTML = `<button class="sync" id="syncBtn" title="Refresh" aria-label="Refresh">&#8635;</button>
+    <button id="meBtn" title="${state.me?"Account":"Sign in"}">${
       esc(state.me ? (state.myName || "Account") : "Sign in")}</button>`;
   $("#meBtn").onclick = ()=>{ state.identityOpen = !state.identityOpen; render(); };
+  $("#syncBtn").onclick = async (ev)=>{
+    ev.currentTarget.classList.add("spin");
+    await refresh(false);
+    toast("Up to date.");
+  };
 }
 
 /* ---------------------------------------------------------------
@@ -866,6 +893,7 @@ function viewPredict(){
     <div style="margin-top:6px">${body}</div>
     ${list.some(moved) ? `<div class="sub" style="margin-top:10px">&dagger; kick-off moved since the fixture was first published.</div>` : ""}
     ${othersKey()}
+    ${saveRow()}
     ${refreshRow()}
   </section>`;
 }
@@ -1006,16 +1034,23 @@ function dataState(){
   </div>`;
 }
 
-// Reads the marker row for anyone who hasn't worked it out.
+/* Who has done what this week. The previous version of this was a
+   legend — every initial rendered once filled and once outlined to
+   explain the two states — which read exactly like a claim that
+   everyone had both called and not called. A count per player says
+   the same thing and can't be misread. */
 function othersKey(){
-  const others = state.players.filter(p=>p.id!==state.me);
-  if(!others.length) return "";
-  return `<div class="sub" style="margin-top:10px">
-    ${others.map(p=>`<span class="keymark in">${esc(INITIALS[p.name]||"?")}</span>`).join("")}
-    called &middot;
-    ${others.map(p=>`<span class="keymark">${esc(INITIALS[p.name]||"?")}</span>`).join("")}
-    still to call. Which way stays hidden until kick-off.
-  </div>`;
+  const list = weekFixtures();
+  if(!list.length || state.players.length < 2) return "";
+  const rows = state.players.map(p=>{
+    const n = list.filter(f => hasPicked(p.id, f.id)).length;
+    const done = n === list.length;
+    return `<span class="tallyman${done?" done":""}">
+      <span class="keymark${done?" in":""}">${esc(INITIALS[p.name]||"?")}</span>${
+      esc(p.id===state.me?"You":p.name)} ${n}/${list.length}</span>`;
+  }).join("");
+  return `<div class="whoweek">${rows}</div>
+    <div class="sub" style="margin-top:6px">Which way anyone leaned stays hidden until kick-off.</div>`;
 }
 
 /* Within 12 hours of a kick-off, anyone still missing a call for it
@@ -1056,22 +1091,34 @@ function refreshRow(){
   </div>`;
 }
 
+/* Every pick is already written the moment it's tapped, so this button
+   has nothing left to do. It exists because a screen that never asks
+   you to save doesn't feel like it saved anything — so it re-checks
+   against the server and says so out loud. */
+function saveRow(){
+  const list = weekFixtures();
+  const done = list.filter(f => myPick(f.id)).length;
+  const all  = done === list.length && list.length > 0;
+  return `<div class="row" style="margin-top:12px">
+    <button class="btn${all?"":" ghost"}" id="saveBtn">${
+      all ? `All ${list.length} saved &#10003;` : `Save ${done} of ${list.length}`}</button>
+  </div>`;
+}
+
 function fixtureRow(f, idx){
   const mv = moved(f);
   const ko = `<div class="ko${mv?" moved":""}" title="${mv?`Moved from ${esc(fmtDay(f.kickoffOriginal))} ${esc(fmtTime(f.kickoffOriginal))}`:""}">${esc(fmtTime(f.kickoff))}${mv?"&dagger;":""}</div>`;
-  // Who has called it, by initial. Never which way — that stays hidden
-  // until kick-off, which is the whole point of the game.
-  const others = state.players.filter(p=>p.id!==state.me);
-  const marks = others.length ? `<div class="whodunnit">${
-    others.map(p=>{
+  // Who has called it, by initial — everyone, you included. Never
+  // which way: that stays hidden until kick-off, which is the game.
+  const marks = state.players.length > 1 ? `<div class="whodunnit">${
+    state.players.map(p=>{
+      const me = p.id === state.me;
       const inYet = hasPicked(p.id, f.id);
-      return `<span class="${inYet?"in":""}" title="${esc(p.name)} ${inYet?"has called it":"hasn't called it yet"}">${esc(INITIALS[p.name]||p.name.slice(0,1))}</span>`;
+      return `<span class="${inYet?"in":""}${me?" me":""}" title="${me?"You":esc(p.name)} ${inYet?"called it":"haven't called it yet"}">${esc(INITIALS[p.name]||p.name.slice(0,1))}</span>`;
     }).join("")}</div>` : "";
   const dots = marks;
   const cur = myPick(f.id);
-  // "?" means the server has a pick from you but won't hand it back
-  // before kick-off, and this device wasn't the one that made it.
-  const elsewhere = cur === "?" ? `<div class="note">called on another device</div>` : "";
+  const elsewhere = "";
   const btns = PICK_ORDER.map(p=>`<button class="pk" data-fx="${f.id}" data-pick="${p}"
       aria-pressed="${cur===p}" aria-label="${PICK_WORD[p]}" title="${PICK_WORD[p]}">${p}</button>`).join("");
   return `<div class="fx" data-fxrow="${f.id}" data-idx="${idx}">
@@ -1089,6 +1136,16 @@ function wirePredict(){
   $("#wkNext") && ($("#wkNext").onclick = ()=>{ if(at<weeks.length-1){ state.week = weeks[at+1]; state.bulk=""; render(); } });
 
   $("#startEntry") && ($("#startEntry").onclick = startEntry);
+  $("#saveBtn") && ($("#saveBtn").onclick = async (ev)=>{
+    const b = ev.currentTarget; const was = b.innerHTML;
+    b.disabled = true; b.innerHTML = "Checking&hellip;";
+    await refresh(true);
+    const list = weekFixtures(), done = list.filter(f=>myPick(f.id)).length;
+    toast(done === list.length && list.length
+      ? `All ${list.length} saved.`
+      : `${done} of ${list.length} saved — ${list.length-done} still to call.`);
+    render();
+  });
 
   const box = $("#bulkBox");
   if(!box) return;
@@ -1164,7 +1221,7 @@ async function sendPicks(rows){
   const live = rows.filter(r=> open(r.fixture));
   if(live.length < rows.length) toast("Some of those have kicked off — skipped.", true);
   if(!live.length) return false;
-  live.forEach(r=> state.pending[r.fixture.id] = r.pick);
+  live.forEach(r=>{ state.pending[r.fixture.id] = r.pick; state.myPicks[r.fixture.id] = r.pick; });
   LS.set(K.pending, JSON.stringify(state.pending));
   try{
     const verdicts = await SB.rpc("pl_predict_batch", {

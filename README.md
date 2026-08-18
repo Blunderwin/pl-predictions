@@ -109,6 +109,11 @@ against the fixtures in front of you.
 they've locked a prediction in, outlined until then. Which way they leaned stays hidden until
 kick-off; the database won't serve it before then regardless.
 
+**Your own calls** follow you between devices. `pl_picks_public` hides every pick until
+kick-off, which is what stops anyone peeking — but it hid yours from you too, on any device
+that didn't make them. `pl_my_picks` (see `own-picks.sql`) returns one player's own picks and
+only to someone who can produce that player's code, so nothing leaks.
+
 **The nudge.** Inside 12 hours of a kick-off, anyone still missing a call for it gets named to
 everyone. Chasing people was the one job the group chat was genuinely doing.
 
