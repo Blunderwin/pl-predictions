@@ -249,6 +249,28 @@ means Supabase Auth.
 
 ---
 
+## Leagues
+
+A prediction belongs to a **player**, not a league. You call each fixture once and it counts
+in every league you're in — otherwise the same person would enter the same string three times,
+which is the thing this app exists to stop.
+
+So a league is a membership list plus an optional `starts_on`. It scopes who you're ranked
+against and from when; it never changes what you predicted. That start date is what separates
+*Predictions 26'*, which began this season, from *OG Predictions*, which counts everything
+back to 2021.
+
+Run `leagues.sql`. It creates the tables and seeds four — OG Predictions, AMM Senior League,
+Predictions 26', Unwin Family — putting everyone currently on the books into the first and
+third. The other two are yours to fill in.
+
+Membership is managed from your account panel: tap a name under a league to add or remove
+them. Only an admin sees those controls, and `pl_league_set_member` re-checks the admin flag
+server-side, so hiding the buttons isn't what's doing the work.
+
+The league selector appears on Table, Results and Stats, and scopes the marker row, the week
+tally and the 12-hour nudge on Predict. *Everyone* ignores membership entirely.
+
 ## Two tiers of truth
 
 The group kept a spreadsheet from 2020 onward, and it is correct. The picks rebuilt from the

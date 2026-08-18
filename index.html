@@ -157,6 +157,16 @@
   .whodunnit span.in{border-color:var(--ok);color:#06180d;background:var(--ok);font-weight:700}
   .whodunnit span.me{border-style:dashed}
   .whodunnit span.in.me{border-style:solid}
+  .leaguerow{padding:10px 0;border-bottom:1px solid var(--rule)}
+  .leaguerow:last-of-type{border-bottom:none}
+  .leaguerow .lname{font-size:14px;margin-bottom:7px}
+  .leaguerow .lname .sub{display:inline;font-size:11.5px}
+  .chip-row{display:flex;flex-wrap:wrap;gap:7px}
+  .chip{font-family:"Space Mono";font-size:12px;padding:7px 12px;border-radius:999px;
+    border:1px solid var(--rule);background:transparent;color:var(--ash);transition:.12s}
+  .chip:hover{border-color:var(--ash);color:var(--chalk)}
+  .chip[aria-pressed="true"]{background:var(--chalk);color:var(--ink);border-color:var(--chalk);font-weight:700}
+  .chip[disabled]{opacity:.4;cursor:not-allowed}
   .whoweek{display:flex;flex-wrap:wrap;gap:8px 14px;margin-top:12px;padding-top:10px;
     border-top:1px solid var(--rule);font-size:12.5px;color:var(--ash)}
   .tallyman{display:inline-flex;align-items:center;gap:6px}
@@ -364,7 +374,8 @@ const LS = {
 };
 const K = { me:"pl_me", pin:"pl_pin", name:"pl_name", admin:"pl_admin", pending:"pl_pending",
             fixtures:"pl_cache_fixtures", players:"pl_cache_players", picks:"pl_cache_picks",
-            history:"pl_cache_history", mine:"pl_cache_mine" };
+            history:"pl_cache_history", mine:"pl_cache_mine",
+            leagues:"pl_cache_leagues", members:"pl_cache_members", league:"pl_league" };
 
 /* Dependency-free PostgREST client. Same shape as the whist app's
    adapter: reads fall back to the local mirror, writes go through
@@ -498,6 +509,10 @@ const state = {
   picks: new Map(),            // "playerId|fixtureId" -> {pick|null, revealed}
   history: [],                 // authoritative per-day scores from the group's spreadsheet
   myPicks: {},                 // fixtureId -> pick, mine only, readable because we hold the code
+  leagues: [],                 // [{id,name,starts_on,sort}]
+  members: [],                 // [{league_id,player_id}]
+  league: null,                // league id on screen, or null for everyone
+  leagueChosen: false,
   pending: {},                 // fixtureId -> "H"|"A"|"D"  (mine, pre-kick-off, local only)
   me: null,                    // player id
   pin: null,                   // this device's four digits, sent with every write
@@ -535,6 +550,11 @@ function hydrateFromCache(){
   state.picks    = new Map(LS.json(K.picks, []));
   state.history  = LS.json(K.history, []);
   state.myPicks  = LS.json(K.mine, {});
+  state.leagues  = LS.json(K.leagues, []);
+  state.members  = LS.json(K.members, []);
+  state.league   = LS.get(K.league) || null;
+  state.leagueChosen = !!state.league;
+  pickLeague();
   refreshInitials();
   pickSeason();
 }
@@ -575,7 +595,7 @@ function seasonSeg(){
 async function refresh(quiet){
   $("#storeBadge").textContent = "Syncing…";
   try{
-    const [players, fixtures, picks, history, own] = await Promise.all([
+    const [players, fixtures, picks, history, own, leagues, members] = await Promise.all([
       SB.get("pl_players_public?select=id,name&order=name.asc"),
       SB.get("pl_fixtures?select=*&order=kickoff_utc.asc,id.asc"),
       SB.get("pl_picks_public?select=player_id,fixture_id,pick,revealed&order=fixture_id.asc,player_id.asc"),
@@ -584,13 +604,18 @@ async function refresh(quiet){
       // come back separately, unlocked by the code this device holds.
       (state.me && state.pin)
         ? SB.rpc("pl_my_picks", { p_player:state.me, p_pin:state.pin }).catch(()=>null)
-        : null
+        : null,
+      SB.get("pl_leagues?select=id,name,starts_on,sort&order=sort.asc").catch(()=>[]),
+      SB.get("pl_league_members?select=league_id,player_id").catch(()=>[])
     ]);
     state.players  = players;
     state.fixtures = fixtures.map(rowToFixture).sort(byKickoff);
     state.picks    = new Map(picks.map(p=>[pickKey(p.player_id,p.fixture_id), {pick:p.pick, revealed:p.revealed}]));
     state.history  = history || [];
     if(own) state.myPicks = Object.fromEntries(own.map(r => [r.fixture_id, r.pick]));
+    state.leagues = leagues || [];
+    state.members = members || [];
+    pickLeague();
     pickSeason();
     refreshInitials();
     prunePending();
@@ -599,6 +624,8 @@ async function refresh(quiet){
     LS.set(K.picks,    JSON.stringify([...state.picks]));
     LS.set(K.history,  JSON.stringify(state.history));
     LS.set(K.mine,     JSON.stringify(state.myPicks));
+    LS.set(K.leagues,  JSON.stringify(state.leagues));
+    LS.set(K.members,  JSON.stringify(state.members));
     $("#storeBadge").textContent = "Live · " + (state.season || "no fixtures");
   }catch(e){
     console.warn("Refresh failed — using cache:", e);
@@ -677,6 +704,23 @@ function viewIdentity(){
     <div class="row" style="margin-top:12px">
       <button class="btn ghost sm" id="showRoster">${state.rosterCodes ? "Hide codes" : "Show everyone's codes"}</button>
     </div>
+
+    <h3 class="sect">Leagues</h3>
+    <div class="sub">Tap a name to add or remove them. A player can be in as many as you like —
+      they still only predict once.</div>
+    ${state.leagues.map(l=>{
+      const ids = leagueMemberIds(l.id);
+      return `<div class="leaguerow">
+        <div class="lname">${esc(l.name)}${l.starts_on?` <span class="sub">from ${esc(l.starts_on)}</span>`:""}</div>
+        <div class="chip-row">${state.players.map(p=>
+          `<button class="chip" data-league-toggle="${esc(l.id)}" data-player="${esc(p.id)}"
+             aria-pressed="${ids.has(p.id)}">${esc(p.name)}</button>`).join("")}</div>
+      </div>`;
+    }).join("")}
+    <div class="row" style="margin-top:10px">
+      <input type="text" id="newLeague" maxlength="30" placeholder="New league name" autocomplete="off" />
+      <button class="btn sm" id="addLeague" style="flex:0 0 auto">Create</button>
+    </div>
     ${state.rosterCodes ? `<ul class="awards">${state.rosterCodes.map(r=>
       `<li><span>${esc(r.name)}</span><span class="pts">${esc(r.pin||"not set")}</span></li>`).join("")}</ul>` : ""}` : "";
 
@@ -750,6 +794,31 @@ function wireIdentity(){
     };
     $("#newName").onkeydown = e => { if(e.key==="Enter") add.click(); };
   }
+
+  $$("[data-league-toggle]").forEach(b=> b.onclick = async ()=>{
+    const on = b.getAttribute("aria-pressed") === "true";
+    b.disabled = true;
+    try{
+      await SB.rpc("pl_league_set_member", { p_admin:state.me, p_admin_pin:state.pin,
+        p_league:b.dataset.leagueToggle, p_player:b.dataset.player, p_member:!on });
+      await refresh(true);
+      render();
+    }catch(e){ toast(rpcMessage(e) || "Couldn't change that.", true); b.disabled = false; }
+  });
+
+  const addL = $("#addLeague");
+  if(addL) addL.onclick = async ()=>{
+    const name = ($("#newLeague").value||"").trim();
+    if(!name) return;
+    addL.disabled = true;
+    try{
+      await SB.rpc("pl_league_create", { p_admin:state.me, p_admin_pin:state.pin, p_name:name, p_starts_on:null });
+      $("#newLeague").value = "";
+      await refresh(true);
+      render();
+    }catch(e){ toast(rpcMessage(e) || "Couldn't create that league.", true); }
+    addL.disabled = false;
+  };
 
   $("#showRoster") && ($("#showRoster").onclick = async ()=>{
     if(state.rosterCodes){ state.rosterCodes = null; render(); return; }
@@ -1041,8 +1110,9 @@ function dataState(){
    the same thing and can't be misread. */
 function othersKey(){
   const list = weekFixtures();
-  if(!list.length || state.players.length < 2) return "";
-  const rows = state.players.map(p=>{
+  const room = scopedPlayers();
+  if(!list.length || room.length < 2) return "";
+  const rows = room.map(p=>{
     const n = list.filter(f => hasPicked(p.id, f.id)).length;
     const done = n === list.length;
     return `<span class="tallyman${done?" done":""}">
@@ -1062,7 +1132,7 @@ function nudgeBanner(){
     new Date(f.kickoff).getTime() - Date.now() < NUDGE_H * 3600e3);
   if(!soon.length) return "";
 
-  const behind = state.players.filter(p =>
+  const behind = scopedPlayers().filter(p =>
     soon.some(f => !hasPicked(p.id, f.id)));
   if(!behind.length) return "";
 
@@ -1110,8 +1180,9 @@ function fixtureRow(f, idx){
   const ko = `<div class="ko${mv?" moved":""}" title="${mv?`Moved from ${esc(fmtDay(f.kickoffOriginal))} ${esc(fmtTime(f.kickoffOriginal))}`:""}">${esc(fmtTime(f.kickoff))}${mv?"&dagger;":""}</div>`;
   // Who has called it, by initial — everyone, you included. Never
   // which way: that stays hidden until kick-off, which is the game.
-  const marks = state.players.length > 1 ? `<div class="whodunnit">${
-    state.players.map(p=>{
+  const room = scopedPlayers();
+  const marks = room.length > 1 ? `<div class="whodunnit">${
+    room.map(p=>{
       const me = p.id === state.me;
       const inYet = hasPicked(p.id, f.id);
       return `<span class="${inYet?"in":""}${me?" me":""}" title="${me?"You":esc(p.name)} ${inYet?"called it":"haven't called it yet"}">${esc(INITIALS[p.name]||p.name.slice(0,1))}</span>`;
@@ -1258,6 +1329,12 @@ async function sendPicks(rows){
 }
 
 function wireCommon(){
+  $$(".segbtn[data-league]").forEach(b=> b.onclick = ()=>{
+    state.league = b.dataset.league || null;
+    state.leagueChosen = true;
+    if(state.league) LS.set(K.league, state.league); else LS.del(K.league);
+    state.statPlayer = null; render();
+  });
   $$(".segbtn[data-season]").forEach(b=> b.onclick = ()=>{
     state.season = b.dataset.season; state.seasonChosen = true;
     state.resultsMd = null; state.statPlayer = null; render();
@@ -1274,6 +1351,42 @@ function wireCommon(){
 /* ---------------------------------------------------------------
    8. SCORING
    --------------------------------------------------------------- */
+/* A league is a membership list and an optional start date. A pick
+   belongs to a player, not a league, so one call counts everywhere
+   you're a member — the league only decides who you're ranked
+   against, and from when. */
+function leagueById(id){ return state.leagues.find(l => l.id === id) || null; }
+function leagueMemberIds(id){
+  if(!id) return null;                                  // null = everyone
+  return new Set(state.members.filter(m => m.league_id === id).map(m => m.player_id));
+}
+// Players in scope, in roster order.
+function scopedPlayers(){
+  const ids = leagueMemberIds(state.league);
+  return ids ? state.players.filter(p => ids.has(p.id)) : state.players;
+}
+// A league that started this season doesn't count what came before.
+function leagueFrom(){
+  const l = leagueById(state.league);
+  return l && l.starts_on ? new Date(l.starts_on + "T00:00:00Z") : null;
+}
+function pickLeague(){
+  if(state.leagueChosen && (state.league === null || leagueById(state.league))) return;
+  if(!state.leagues.length){ state.league = null; return; }
+  // Default to the first league you're actually in.
+  const mine = state.leagues.find(l =>
+    state.members.some(m => m.league_id === l.id && m.player_id === state.me));
+  state.league = (mine || state.leagues[0]).id;
+}
+function leagueSeg(){
+  if(state.leagues.length < 2) return "";
+  return `<div class="seg">
+    ${state.leagues.map(l =>
+      `<button class="btn sm ghost segbtn" data-league="${esc(l.id)}" aria-pressed="${l.id===state.league}">${esc(l.name)}</button>`).join("")}
+    <button class="btn sm ghost segbtn" data-league="" aria-pressed="${state.league===null}">Everyone</button>
+  </div>`;
+}
+
 const ALL_TIME = "*";
 const allTime = () => state.season === ALL_TIME;
 function seasonFixtures(){
@@ -1311,15 +1424,16 @@ const dayOf = f => new Date(f.kickoff).toISOString().slice(0,10);
 // Every derived number in the app comes off this one pass, so the
 // Table, Results and Stats views can never disagree with each other.
 function computeSeason(){
-  const fixtures = settledFixtures();
-  const hist = historyFor(state.season);
+  const from = leagueFrom();
+  const fixtures = settledFixtures().filter(f => !from || new Date(f.kickoff) >= from);
+  const hist = historyFor(state.season).filter(h => !from || new Date(h.played_on + "T00:00:00Z") >= from);
   const verified = verifiedDaysFor(state.season);
   const hasHistory = hist.length > 0;
   // All-time spans both worlds: the spreadsheet covers the finished
   // seasons, the app's own record covers the live one. Which applies
   // is a property of the fixture's season, not of the view.
   const histSeasons = seasonsWithHistory();
-  const players = state.players.map(p=>({
+  const players = scopedPlayers().map(p=>({
     id:p.id, name:p.name,
     played:0, correct:0, missed:0, untrusted:0,
     points:0, scored:0, dayWins:0, hasTruth:false,
@@ -1490,8 +1604,8 @@ function viewTable(){
   const s = computeSeason();
   if(!s.fixtureCount && !s.hasHistory){
     return `<section class="panel"><h2>Table</h2>
-      <div class="sub">Nothing settled in ${esc(state.season||"this season")} yet.</div>
-      ${seasonSeg()}
+      <div class="sub">Nothing settled for ${esc(leagueById(state.league)?.name || "everyone")} in ${esc(state.season==="*"?"any season":state.season||"this season")} yet.</div>
+      ${leagueSeg()}${seasonSeg()}
       <div class="empty">The table fills in as results land.</div>${refreshRow()}</section>`;
   }
   const wins = matchdayWinners(s);
@@ -1523,6 +1637,7 @@ function viewTable(){
 
   return `<section class="panel">
     <h2>Table</h2>
+    ${leagueSeg()}
     <div class="sub">${allTime() ? "All time · " : ""}${s.hasHistory ? `${s.total} matches scored` : `${s.fixtureCount} match${s.fixtureCount===1?"":"es"} settled`}</div>
     ${seasonSeg()}
     <div class="keys" style="margin-top:14px">
@@ -1562,7 +1677,7 @@ function viewResults(){
   const fx = state.fixtures.filter(f=> f.season === scope && kicked(f) && !VOID(f));
   if(!fx.length) return `<section class="panel"><h2>Results</h2>
     <div class="sub">Nothing played in ${esc(state.season||"this season")} yet.</div>
-    ${seasonSeg()}
+    ${leagueSeg()}${seasonSeg()}
     <div class="empty">Pick an earlier season, or wait for kick-off.</div>${refreshRow()}</section>`;
 
   const mds = [...new Set(fx.map(f=>f.matchday))].sort((a,b)=>b-a);
@@ -1572,7 +1687,7 @@ function viewResults(){
   const seg = `<div class="seg">${mds.slice(0,18).map(m=>
     `<button class="btn sm ghost segbtn" data-md="${m}" aria-pressed="${m===md}">MD ${m}</button>`).join("")}</div>`;
 
-  const cols = state.players;
+  const cols = scopedPlayers();
   const head = `<tr><th>Match</th><th class="num">Score</th><th class="res">Res</th>${
     cols.map(p=>`<th class="cell" title="${esc(p.name)}">${esc(p.name.slice(0,3))}</th>`).join("")}</tr>`;
 
@@ -1596,6 +1711,7 @@ function viewResults(){
 
   return `<section class="panel">
     <h2>Results</h2>
+    ${leagueSeg()}
     <div class="sub">Everyone&rsquo;s calls, revealed at kick-off.${
       allTime() ? ` Showing ${esc(scope)} — pick a season to change it.` : ""}</div>
     ${seasonSeg()}
@@ -1676,9 +1792,9 @@ function viewStats(){
   const s = computeSeason();
   if(!s.fixtureCount && !s.hasHistory){
     return `<section class="panel"><h2>Stats</h2>
-      <div class="sub">Nothing settled in ${esc(state.season||"this season")} yet.</div>
-      ${seasonSeg()}
-      <div class="empty">Come back after a matchday, or pick an earlier season.</div>${refreshRow()}</section>`;
+      <div class="sub">Nothing settled for ${esc(leagueById(state.league)?.name || "everyone")} in ${esc(state.season==="*"?"any season":state.season||"this season")} yet.</div>
+      ${leagueSeg()}${seasonSeg()}
+      <div class="empty">Come back after a matchday, or pick another league or season.</div>${refreshRow()}</section>`;
   }
   if(state.statPlayer){
     const p = s.players.find(x=>x.id===state.statPlayer);
@@ -1775,6 +1891,7 @@ function viewStats(){
   return `<section class="panel">
     <h2>Stats</h2>
     <div class="sub">Minimum ${MIN} calls for a rate-based award.</div>
+    ${leagueSeg()}
     ${seasonSeg()}
     ${coverageNote(s)}
     <div class="keys" style="margin-top:14px">${tiles}</div>
