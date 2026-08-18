@@ -76,9 +76,11 @@ export function parseSnapchat(text, authors){
     const d = L.match(SNAP_DATE);
     if(d){ date = { y:+d[3], m:MONTHS.indexOf(d[2]), d:+d[1] }; cur = null; continue; }
 
-    const t = (lines[i + 1] || "").trim().match(SNAP_TIME);
+    let ahead = 1;
+    while(/^\(edited\)$/i.test((lines[i + ahead] || "").trim())) ahead++;
+    const t = (lines[i + ahead] || "").trim().match(SNAP_TIME);
     if(known.has(L) && t){
-      i++;                                    // consume the time line
+      i += ahead;                             // consume "(Edited)" and the time line
       if(!date){ orphaned++; cur = null; continue; }   // before the first separator
       cur = { ts: ukInstant(date.y, date.m, date.d, +t[1], +t[2]), author: L, text: "" };
       out.push(cur);
@@ -98,7 +100,9 @@ export function sniffSnapchatAuthors(text){
   for(let i = 0; i < lines.length - 1; i++){
     const a = lines[i].trim();
     if(!a || a.length > 40 || SNAP_DATE.test(a)) continue;
-    if(!SNAP_TIME.test(lines[i + 1].trim())) continue;
+    let ahead = 1;
+    while(/^\(edited\)$/i.test((lines[i + ahead] || "").trim())) ahead++;
+    if(!SNAP_TIME.test((lines[i + ahead] || "").trim())) continue;
     tally.set(a, (tally.get(a) || 0) + 1);
   }
   // A real author appears constantly; stray lines that happen to precede

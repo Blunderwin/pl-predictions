@@ -46,6 +46,11 @@ const MAPF    = argVal("--map");
 const OUT     = argVal("--out") || "chat-import-report.tsv";
 const SEASONS = (argVal("--seasons") || "").split(",").filter(Boolean).map(Number);
 const MAX_RUN = Number(argVal("--max") || 10);
+const LOOSE   = !args.includes("--strict");  // take pick lines out of messages that also carry prose
+// The group tolerated a late call — a message posted after the whistle
+// still counted. Without a grace window every pick in that batch is
+// thrown away, which is the single largest source of missing coverage.
+const GRACE_H = Number(argVal("--grace") ?? 0);
 
 function argVal(flag){ const i = args.indexOf(flag); return i > -1 ? args[i + 1] : null; }
 function isValueOf(a){ const i = args.indexOf(a); return i > 0 && args[i - 1].startsWith("--") && args[i - 1] !== "--write"; }
@@ -69,13 +74,29 @@ async function sb(path, init){
 }
 
 /* ---------- What counts as a call ---------- */
-const LETTERS = /^[HAD_\-.*\s]+$/;                 // deliberately case-sensitive
-export function asPicks(text){
-  const t = text.replace(/\s/g, "");
-  if(t.length < 1 || t.length > 24) return null;
-  if(!LETTERS.test(t)) return null;
-  const picks = [...t].map(c => "HAD".includes(c) ? c : null);
-  return picks.some(Boolean) ? picks : null;
+const PICK_LINE = /^[HAD_\-.*]+$/;                 // deliberately case-sensitive
+// A batch is often labelled with the day it covers: "Sat: HAHHDDH",
+// "Sunday: DDDA", "15th - HHHAD". The label is not a pick.
+const DAY_LABEL = /^\s*(?:(?:mon|tues?|wed(?:nes)?|thur?s?|fri|sat(?:ur)?|sun)[a-z]*|\d{1,2}(?:st|nd|rd|th)?)\s*[:\-–]\s*/i;
+// Naming someone else means the message is carrying their calls rather
+// than the sender's — "Toby sent me this / HHAHHAA".
+const NAMES_SOMEONE = /\b(darius|toby|tobes|tobias|ben)\b/i;
+
+export function asPicks(text, loose = LOOSE){
+  const lines = String(text).split("\n").map(l => l.trim()).filter(Boolean);
+  const picks = [];
+  let prose = 0;
+  for(const line of lines){
+    const s = line.replace(DAY_LABEL, "").replace(/\s/g, "");
+    if(s && s.length <= 20 && PICK_LINE.test(s)){ picks.push(...s); continue; }
+    prose++;
+  }
+  if(!picks.length || picks.length > 24) return null;
+  // A message that is nothing but calls is safe on its own. One with
+  // prose around them is only safe once we know it isn't relaying
+  // somebody else's.
+  if(prose && (!loose || NAMES_SOMEONE.test(text))) return null;
+  return picks.map(c => "HAD".includes(c) ? c : null);
 }
 // Strictly alternating H and A: "HAHA" is laughter, "HAHHA" has a
 // double and is a real call.
@@ -85,6 +106,39 @@ const isSingle   = t => t.replace(/\s/g, "").length === 1;
 
 const iso  = d => d.toISOString().slice(0, 16).replace("T", " ");
 const flat = t => t.replace(/\s+/g, " ").slice(0, 60);
+
+/**
+ * A batch covers whole days, not "the next N fixtures".
+ *
+ * Someone posting seven letters on Friday evening means Saturday's
+ * seven matches — even though Friday's 20:00 kick-off is still open
+ * and would otherwise swallow the first letter and shift the rest.
+ * Verified against the group's spreadsheet: this was the single
+ * largest remaining source of disagreement.
+ *
+ * So: group the open fixtures by day and look for a run of whole days
+ * whose fixture count is exactly the length of the string, preferring
+ * the earliest such run. Only fall back to consuming fixtures in order
+ * when no run matches, which is the case for a partial batch.
+ */
+const MAX_SKIP = 3;                          // don't leap further than a few days to find a fit
+function alignToDays(n, open){
+  const days = [];
+  for(const f of open){
+    const d = f.kickoff_utc.slice(0, 10);
+    if(!days.length || days[days.length - 1].day !== d) days.push({ day:d, list:[] });
+    days[days.length - 1].list.push(f);
+  }
+  for(let start = 0; start < Math.min(days.length, MAX_SKIP); start++){
+    let sum = 0;
+    for(let k = start; k < days.length; k++){
+      sum += days[k].list.length;
+      if(sum === n) return days.slice(start, k + 1).flatMap(d => d.list);
+      if(sum > n) break;
+    }
+  }
+  return open;
+}
 
 /* ---------- Go ---------- */
 const messages = [];
@@ -166,7 +220,9 @@ for(const msg of messages){
   if(single) counts.single++;
   posters.add(msg.author);
 
-  const openAt = fixtures.filter(f => new Date(f.kickoff_utc) > msg.ts && f.season === season);
+  const cutoff = new Date(msg.ts.getTime() - GRACE_H * 3600e3);
+  const stillOpen = fixtures.filter(f => new Date(f.kickoff_utc) > cutoff && f.season === season);
+  const openAt = alignToDays(picks.length, stillOpen);
   picks.forEach((pick, i) => {
     if(!pick) return;                                   // "_" skips a fixture
     const f = openAt[i];
@@ -241,7 +297,14 @@ writeFileSync(sqlFile, [
   "-- Historic predictions reconstructed from the group's chat history.",
   "-- Run pl_fixtures backfill for every season below FIRST, or these",
   "-- match nothing: " + SEASONS.map(y => `${y}/${String((y+1)%100).padStart(2,"0")}`).join(", "),
-  "-- Re-runnable: conflicts update the pick rather than erroring.",
+  "-- Re-runnable. The delete matters: a re-import can map a pick onto a",
+  "-- different fixture than last time, so an upsert alone would leave the",
+  "-- old row behind. Only the seasons listed above are touched, so the",
+  "-- live season's real picks are safe.",
+  "",
+  "delete from pl_predictions where fixture_id in (",
+  "  select id from pl_fixtures where season in (" +
+    SEASONS.map(y => `'${y}/${String((y+1)%100).padStart(2,"0")}'`).join(", ") + "));",
   "",
   ...chunks.map(chunk =>
     "insert into pl_predictions (player_id, fixture_id, pick, created_at, updated_at)\n" +

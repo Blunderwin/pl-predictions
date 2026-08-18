@@ -183,7 +183,14 @@ strings.
 Read the strike rates it prints before loading anything. H/A/D calls land near 40–55%; a
 player well outside that has misaligned strings, not bad luck.
 
-Four rules the real exports forced, each of which would otherwise have corrupted a season:
+Five rules the real exports forced, each of which would otherwise have corrupted a season:
+
+- **A batch covers whole days, not the next N fixtures.** Seven letters posted on Friday
+  evening means Saturday's seven matches — but Friday's 20:00 kick-off is still open and
+  would swallow the first letter, shifting everything after it. The importer groups the open
+  fixtures by day and looks for a run of whole days whose fixture count matches the string
+  length exactly, preferring the earliest. This was worth 215 extra fully-recovered
+  player-days on its own.
 
 - **Only whole messages count.** "Toby sent me this / HHAHHAA" is one person relaying
   another's calls. Picking strings out of mixed messages attributes them to the wrong
