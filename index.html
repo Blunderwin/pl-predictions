@@ -282,7 +282,8 @@ const LS = {
   json(k,fb){ const r=this.get(k); if(!r) return fb; try{ return JSON.parse(r); }catch{ this.del(k); return fb; } }
 };
 const K = { me:"pl_me", pin:"pl_pin", name:"pl_name", admin:"pl_admin", pending:"pl_pending",
-            fixtures:"pl_cache_fixtures", players:"pl_cache_players", picks:"pl_cache_picks" };
+            fixtures:"pl_cache_fixtures", players:"pl_cache_players", picks:"pl_cache_picks",
+            history:"pl_cache_history" };
 
 /* Dependency-free PostgREST client. Same shape as the whist app's
    adapter: reads fall back to the local mirror, writes go through
@@ -291,10 +292,25 @@ const SB = {
   _h(extra){ const k = CONFIG.supabase.anonKey;
     return { apikey:k, Authorization:`Bearer ${k}`, "Content-Type":"application/json", ...(extra||{}) }; },
   _url(p){ return CONFIG.supabase.url.replace(/\/$/,"") + "/rest/v1/" + p; },
+  // PostgREST answers with at most 1000 rows and a 206, so a single
+  // GET silently truncates. Six seasons is 2280 fixtures and ~5000
+  // picks, so without paging the app shows a third of the history and
+  // every total is quietly wrong. Paging needs a deterministic order
+  // or rows repeat or vanish across page boundaries — hence the id
+  // tiebreaks on each caller.
   async get(path){
-    const res = await fetch(this._url(path), { headers:this._h() });
-    if(!res.ok) throw new Error("HTTP "+res.status+" "+(await res.text()));
-    return res.json();
+    const PAGE = 1000;
+    const out = [];
+    for(let from = 0; ; from += PAGE){
+      const res = await fetch(this._url(path), {
+        headers: this._h({ "Range-Unit":"items", Range: from + "-" + (from + PAGE - 1) })
+      });
+      if(!res.ok) throw new Error("HTTP "+res.status+" "+(await res.text()));
+      const rows = await res.json();
+      out.push(...rows);
+      if(rows.length < PAGE) return out;
+      if(out.length > 100000) return out;                 // runaway guard
+    }
   },
   async rpc(fn, args){
     const res = await fetch(this._url("rpc/" + fn), {
@@ -390,6 +406,7 @@ const state = {
   players: [],                 // [{id,name}]
   fixtures: [],                // sorted by kickoff
   picks: new Map(),            // "playerId|fixtureId" -> {pick|null, revealed}
+  history: [],                 // authoritative per-day scores from the group's spreadsheet
   pending: {},                 // fixtureId -> "H"|"A"|"D"  (mine, pre-kick-off, local only)
   me: null,                    // player id
   pin: null,                   // this device's four digits, sent with every write
@@ -423,6 +440,7 @@ function hydrateFromCache(){
   state.players  = LS.json(K.players, []);
   state.fixtures = LS.json(K.fixtures, []).map(f=>f).sort(byKickoff);
   state.picks    = new Map(LS.json(K.picks, []));
+  state.history  = LS.json(K.history, []);
   pickSeason();
 }
 
@@ -445,19 +463,22 @@ function seasonSeg(){
 async function refresh(quiet){
   $("#storeBadge").textContent = "Syncing…";
   try{
-    const [players, fixtures, picks] = await Promise.all([
+    const [players, fixtures, picks, history] = await Promise.all([
       SB.get("pl_players_public?select=id,name&order=name.asc"),
-      SB.get("pl_fixtures?select=*&order=kickoff_utc.asc"),
-      SB.get("pl_picks_public?select=player_id,fixture_id,pick,revealed")
+      SB.get("pl_fixtures?select=*&order=kickoff_utc.asc,id.asc"),
+      SB.get("pl_picks_public?select=player_id,fixture_id,pick,revealed&order=fixture_id.asc,player_id.asc"),
+      SB.get("pl_history?select=player_id,season,played_on,correct,matches,recovered,verified&order=season.asc,played_on.asc,player_id.asc").catch(()=>[])
     ]);
     state.players  = players;
     state.fixtures = fixtures.map(rowToFixture).sort(byKickoff);
     state.picks    = new Map(picks.map(p=>[pickKey(p.player_id,p.fixture_id), {pick:p.pick, revealed:p.revealed}]));
+    state.history  = history || [];
     pickSeason();
     prunePending();
     LS.set(K.players,  JSON.stringify(state.players));
     LS.set(K.fixtures, JSON.stringify(state.fixtures));
     LS.set(K.picks,    JSON.stringify([...state.picks]));
+    LS.set(K.history,  JSON.stringify(state.history));
     $("#storeBadge").textContent = "Live · " + (state.season || "no fixtures");
   }catch(e){
     console.warn("Refresh failed — using cache:", e);
@@ -893,13 +914,41 @@ function wireCommon(){
 function seasonFixtures(){ return state.fixtures.filter(f=> !state.season || f.season===state.season); }
 function settledFixtures(){ return seasonFixtures().filter(SETTLED); }
 
+/* The group kept a spreadsheet from 2020 onward and it is correct. The
+   picks rebuilt from the chat exports are about 93% complete, so the
+   two are used for different things and never mixed:
+
+     pl_history is the authority on SCORES. Points, standings, totals.
+
+     pl_predictions is the authority on PICKS, but only on days flagged
+     verified — where the reconstruction recovered every fixture and
+     independently arrived at the sheet's own number. Everywhere else
+     it has holes, and a hole in "how often do you call a draw" is a
+     wrong answer rather than a missing one.
+
+   For the live season there's no spreadsheet, the app recorded every
+   pick itself, and both tiers are the same thing. */
+function historyFor(season){
+  return state.history.filter(h => h.season === season);
+}
+function verifiedDaysFor(season){
+  const set = new Set();
+  historyFor(season).forEach(h => { if(h.verified) set.add(h.player_id + "|" + h.played_on); });
+  return set;
+}
+const dayOf = f => new Date(f.kickoff).toISOString().slice(0,10);
+
 // Every derived number in the app comes off this one pass, so the
 // Table, Results and Stats views can never disagree with each other.
 function computeSeason(){
   const fixtures = settledFixtures();
+  const hist = historyFor(state.season);
+  const verified = verifiedDaysFor(state.season);
+  const hasHistory = hist.length > 0;
   const players = state.players.map(p=>({
     id:p.id, name:p.name,
-    played:0, correct:0, missed:0,
+    played:0, correct:0, missed:0, untrusted:0,
+    points:0, scored:0, dayWins:0, hasTruth:false,
     byPick:{H:{n:0,ok:0},A:{n:0,ok:0},D:{n:0,ok:0}},
     bestStreak:0, curStreak:0, _run:0,
     solo:0, blind:0, withHerd:0, herdN:0,
@@ -918,6 +967,7 @@ function computeSeason(){
     if(p.firstAt===null || t < p.firstAt) p.firstAt = t;
   });
 
+  let seriesLabels = null;
   const actual = {H:0,A:0,D:0};
   const drama = [];        // per-fixture, for the banana-skin awards
   const md = new Set();
@@ -932,12 +982,17 @@ function computeSeason(){
     const rightCount = calls.filter(c=>c.pick===f.result).length;
     md.add(f.matchday);
 
+    const day = dayOf(f);
     players.forEach(p=>{
       const call = calls.find(c=>c.p===p);
+      // On a historic season, only days proven against the spreadsheet
+      // may inform how someone predicts.
+      const trust = !hasHistory || verified.has(p.id + "|" + day);
       if(!call){
-        if(p.firstAt !== null && ko >= p.firstAt) p.missed++;
+        if(!hasHistory && p.firstAt !== null && ko >= p.firstAt) p.missed++;
         return;
       }
+      if(!trust){ p.untrusted++; return; }
       const hit = call.pick === f.result;
       p.played++;
       p.byPick[call.pick].n++;
@@ -961,24 +1016,72 @@ function computeSeason(){
 
   players.forEach(p=>{
     p.curStreak = p._run;
-    p.acc = pct(p.correct, p.played);
     p.form = p.form.slice(-6);
+    // Points and accuracy come off the spreadsheet when there is one.
+    const mine = hist.filter(x => x.player_id === p.id);
+    if(mine.length){
+      p.hasTruth = true;
+      p.points = mine.reduce((n,x)=> n + x.correct, 0);
+      p.scored = mine.reduce((n,x)=> n + x.matches, 0);
+      p.verifiedDays = mine.filter(x=>x.verified).length;
+      p.totalDays = mine.length;
+      p.recoveredPicks = mine.reduce((n,x)=> n + x.recovered, 0);
+    }else{
+      p.points = p.correct;
+      p.scored = p.played;
+      p.verifiedDays = p.totalDays = 0;
+      p.recoveredPicks = p.played;
+    }
+    p.acc = pct(p.points, p.scored);          // strike rate over everything that was playable
+    p.pickAcc = pct(p.correct, p.played);     // strike rate over the picks we can actually see
   });
 
-  // Cumulative points by matchday — the shape of the season.
-  const mds = [...md].sort((a,b)=>a-b);
-  players.forEach(p=>{
-    let run = 0;
-    p.series = mds.map(m=>{ run += (p.byMd[m]?.ok || 0); return run; });
-  });
+  // Day wins, from the spreadsheet where there is one — it knows about
+  // days the reconstruction never recovered.
+  if(hasHistory){
+    const byDay = {};
+    hist.forEach(x => (byDay[x.played_on] = byDay[x.played_on] || []).push(x));
+    Object.values(byDay).forEach(day => {
+      if(day.length < 2) return;
+      const top = Math.max(...day.map(x=>x.correct));
+      if(top === 0) return;
+      const winners = day.filter(x=>x.correct === top);
+      if(winners.length === 1) byId.get(winners[0].player_id) && byId.get(winners[0].player_id).dayWins++;
+    });
+  }
+
+  // Cumulative points — the shape of the season. Drawn from the same
+  // anchor as the table: the spreadsheet where there is one, the app's
+  // own record otherwise. Drawing it off the partial reconstruction
+  // would put a second, quieter set of totals on the same page.
+  let mds = [...md].sort((a,b)=>a-b);
+  if(hasHistory){
+    const days = [...new Set(hist.map(x=>x.played_on))].sort();
+    const byPlayerDay = {};
+    hist.forEach(x => byPlayerDay[x.player_id + "|" + x.played_on] = x.correct);
+    players.forEach(p=>{
+      let run = 0;
+      p.series = days.map(d => { run += (byPlayerDay[p.id + "|" + d] || 0); return run; });
+    });
+    mds = days.map((_,i)=> i + 1);
+    seriesLabels = [days[0], days[days.length-1]];
+  }else{
+    players.forEach(p=>{
+      let run = 0;
+      p.series = mds.map(m=>{ run += (p.byMd[m]?.ok || 0); return run; });
+    });
+  }
 
   // Two baselines worth beating: always calling the home side, and
   // always calling whatever the group's majority called.
   let homeAlways = 0;
   fixtures.forEach(f=>{ if(f.result==="H") homeAlways++; });
 
-  players.sort((a,b)=> b.correct-a.correct || b.acc-a.acc || a.name.localeCompare(b.name));
-  return { players, fixtures, mds, actual, drama, homeAlways, total:fixtures.length };
+  players.sort((a,b)=> b.points-a.points || b.acc-a.acc || a.name.localeCompare(b.name));
+  const anyTruth = players.some(p=>p.hasTruth);
+  return { players, fixtures, mds, actual, drama, homeAlways, hasHistory:anyTruth, seriesLabels,
+           fixtureCount: fixtures.length,
+           total: anyTruth ? Math.max(...players.map(p=>p.scored)) : fixtures.length };
 }
 
 // Matchday winners: outright if alone on top, shared otherwise. Only
@@ -1002,7 +1105,7 @@ function matchdayWinners(season){
    --------------------------------------------------------------- */
 function viewTable(){
   const s = computeSeason();
-  if(!s.total){
+  if(!s.fixtureCount && !s.hasHistory){
     return `<section class="panel"><h2>Table</h2>
       <div class="empty">Nothing settled yet. The table fills in as results land.</div>${refreshRow()}</section>`;
   }
@@ -1012,15 +1115,16 @@ function viewTable(){
 
   const rows = s.players.map((p,i)=>{
     const form = p.form.map(ok=>`<i class="${ok?"ok":"no"}"></i>`).join("");
-    const streak = p.curStreak >= 3 ? ` <span class="streak" title="correct in a row">+${p.curStreak}</span>` : "";
+    const streak = !s.hasHistory && p.curStreak >= 3 ? ` <span class="streak" title="correct in a row">+${p.curStreak}</span>` : "";
+    const dayw = s.hasHistory ? p.dayWins : (mdWins[p.id]||0);
     return `<tr class="${p.id===state.me?"me":""}">
       <td class="num">${i+1}</td>
       <td>${esc(p.name)}${streak}</td>
-      <td class="num">${p.played}</td>
-      <td class="num" style="color:var(--mark);font-weight:700">${p.correct}</td>
+      <td class="num">${p.scored}</td>
+      <td class="num" style="color:var(--mark);font-weight:700">${p.points}</td>
       <td class="num">${p.acc}%</td>
-      <td class="num">${mdWins[p.id]||0}</td>
-      <td><div class="form">${form}</div></td>
+      <td class="num">${dayw}</td>
+      <td>${s.hasHistory ? coverageBar(p) : `<div class="form">${form}</div>`}</td>
     </tr>`;
   }).join("");
 
@@ -1029,26 +1133,29 @@ function viewTable(){
   const gap = leader && chase ? leader.correct - chase.correct : 0;
 
   const chart = cumulativeChart(s);
-  const beat = s.players.filter(p=> p.correct > Math.round(s.homeAlways * (p.played/s.total || 0))).length;
+  // Would you have done better just backing the home side every week?
+  const beat = s.players.filter(p=> p.points > Math.round(s.homeAlways * (p.scored / (s.fixtureCount||1)))).length;
 
   return `<section class="panel">
     <h2>Table</h2>
-    <div class="sub">${s.total} match${s.total===1?"":"es"} settled</div>
+    <div class="sub">${s.hasHistory ? `${s.total} matches scored` : `${s.fixtureCount} match${s.fixtureCount===1?"":"es"} settled`}</div>
     ${seasonSeg()}
     <div class="keys" style="margin-top:14px">
       <div class="key"><div class="big">${leader ? esc(leader.correct) : 0}</div><div class="lbl">Top score · ${esc(leader?.name||"")}</div></div>
       <div class="key"><div class="big">${gap}</div><div class="lbl">Lead over ${esc(chase?.name||"the pack")}</div></div>
-      <div class="key"><div class="big">${pct(s.actual.H, s.total)}%</div><div class="lbl">Home wins this season</div></div>
+      <div class="key"><div class="big">${pct(s.actual.H, s.fixtureCount)}%</div><div class="lbl">Home wins this season</div></div>
       <div class="key"><div class="big">${beat}/${s.players.length}</div><div class="lbl">Beating "always home"</div></div>
     </div>
     <div class="scroller" style="margin-top:8px">
       <table class="grid">
         <thead><tr><th class="num">#</th><th>Player</th><th class="num">P</th><th class="num">Pts</th>
-          <th class="num">Acc</th><th class="num">MD</th><th>Form</th></tr></thead>
+          <th class="num">Acc</th><th class="num">${s.hasHistory?"D":"MD"}</th><th>${s.hasHistory?"Coverage":"Form"}</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>
-    <div class="sub" style="margin-top:8px">P played · Pts correct calls · MD outright matchday wins · form runs oldest to newest.</div>
+    <div class="sub" style="margin-top:8px">${s.hasHistory
+      ? "P matches · Pts correct calls, from the group's spreadsheet · D outright day wins · coverage is how much of the season's picks survived in the chat history."
+      : "P played · Pts correct calls · MD outright matchday wins · form runs oldest to newest."}</div>
     ${chart}
     ${refreshRow()}
   </section>`;
@@ -1057,6 +1164,14 @@ function viewTable(){
 /* ---------------------------------------------------------------
    10. RESULTS
    --------------------------------------------------------------- */
+// How much of a historic season's picks survived in the chat exports.
+// Shown instead of form, because form off a 93%-complete record is a
+// story about the gaps rather than about the player.
+function coverageBar(p){
+  const pctv = pct(p.verifiedDays, p.totalDays);
+  return `<span class="mono" style="font-size:11.5px;color:var(--ash)" title="${p.verifiedDays} of ${p.totalDays} days verified against the spreadsheet">${pctv}%</span>`;
+}
+
 function viewResults(){
   const fx = seasonFixtures().filter(f=> kicked(f) && !VOID(f));
   if(!fx.length) return `<section class="panel"><h2>Results</h2><div class="empty">No matches played yet.</div>${refreshRow()}</section>`;
@@ -1135,7 +1250,7 @@ function barChartSVG(items, opts={}){
 
 // One line per player, cumulative points against matchday.
 function cumulativeChart(s){
-  const withData = s.players.filter(p=>p.played>0);
+  const withData = s.players.filter(p=>p.scored>0);
   if(s.mds.length < 2 || !withData.length) return "";
   const W=540, H=200, padL=30, padR=10, padT=12, padB=22;
   const max = Math.max(1, ...withData.map(p=>p.series[p.series.length-1]));
@@ -1153,8 +1268,9 @@ function cumulativeChart(s){
     return `<path d="${d}" fill="none" style="stroke:${col};stroke-width:2;stroke-linejoin:round"/>
       <circle cx="${(padL+(p.series.length-1)*stepX).toFixed(1)}" cy="${y(last).toFixed(1)}" r="3" style="fill:${col}"/>`;
   }).join("");
-  const xlab = `<text x="${padL}" y="${H-6}" font-family="Space Mono" font-size="9.5" style="fill:var(--ash)">MD ${s.mds[0]}</text>
-    <text x="${W-padR}" y="${H-6}" text-anchor="end" font-family="Space Mono" font-size="9.5" style="fill:var(--ash)">MD ${s.mds[s.mds.length-1]}</text>`;
+  const ends = s.seriesLabels || [`MD ${s.mds[0]}`, `MD ${s.mds[s.mds.length-1]}`];
+  const xlab = `<text x="${padL}" y="${H-6}" font-family="Space Mono" font-size="9.5" style="fill:var(--ash)">${esc(ends[0])}</text>
+    <text x="${W-padR}" y="${H-6}" text-anchor="end" font-family="Space Mono" font-size="9.5" style="fill:var(--ash)">${esc(ends[1])}</text>`;
   const legend = withData.map((p,i)=>
     `<span><b style="background:${SWATCH[i%SWATCH.length]}"></b>${esc(p.name)}</span>`).join("");
   return `<div class="chart-card"><div class="ctitle">Points through the season</div>
@@ -1168,7 +1284,7 @@ function cumulativeChart(s){
    --------------------------------------------------------------- */
 function viewStats(){
   const s = computeSeason();
-  if(!s.total){
+  if(!s.fixtureCount && !s.hasHistory){
     return `<section class="panel"><h2>Stats</h2>
       <div class="empty">Nothing to pick over yet. Come back after a matchday.</div>${refreshRow()}</section>`;
   }
@@ -1200,8 +1316,8 @@ function viewStats(){
   const pair = pairStats(s);
 
   const tiles = [
-    `<div class="key"><div class="big">${s.total}</div><div class="lbl">Matches settled</div></div>`,
-    `<div class="key"><div class="big">${pct(s.actual.H,s.total)}/${pct(s.actual.D,s.total)}/${pct(s.actual.A,s.total)}</div><div class="lbl">Actual H / D / A split</div></div>`,
+    `<div class="key"><div class="big">${s.fixtureCount}</div><div class="lbl">Matches settled</div></div>`,
+    `<div class="key"><div class="big">${pct(s.actual.H,s.fixtureCount)}/${pct(s.actual.D,s.fixtureCount)}/${pct(s.actual.A,s.fixtureCount)}</div><div class="lbl">Actual H / D / A split</div></div>`,
     `<div class="key"><div class="big">${gimme}</div><div class="lbl">Matches nobody got wrong</div></div>`,
     banana ? `<div class="key"><div class="big">0/${banana.calls.length}</div><div class="lbl">Banana skin · ${esc(banana.fixture.homeShort)} v ${esc(banana.fixture.awayShort)} (${banana.fixture.result})</div></div>` : "",
     bestMd ? `<div class="key"><div class="big">${bestMd.ok}/${bestMd.n}</div><div class="lbl">Best matchday · ${esc(bestMd.p.name)}, MD${bestMd.md}</div></div>` : ""
@@ -1256,7 +1372,7 @@ function viewStats(){
   add("Ghost",              absentee && absentee.missed>0, absentee && `${esc(absentee.name)} · ${absentee.missed}`, "most deadlines missed");
 
   const accChart = barChartSVG(
-    [...s.players].filter(p=>p.played>0).sort((a,b)=>b.acc-a.acc).map((p,i)=>({label:p.name, value:p.acc, color:SWATCH[i%SWATCH.length]})),
+    [...s.players].filter(p=>p.scored>0).sort((a,b)=>b.acc-a.acc).map((p,i)=>({label:p.name, value:p.acc, color:SWATCH[i%SWATCH.length]})),
     {valFmt:v=>v+"%", label:"strike rate"});
 
   const styleChart = pickMixChart(s);
@@ -1268,6 +1384,7 @@ function viewStats(){
     <h2>Stats</h2>
     <div class="sub">Minimum ${MIN} calls for a rate-based award.</div>
     ${seasonSeg()}
+    ${coverageNote(s)}
     <div class="keys" style="margin-top:14px">${tiles}</div>
     <h3 class="sect">Awards</h3>
     <ul class="awards">${A.join("")}</ul>
@@ -1277,6 +1394,25 @@ function viewStats(){
     <div class="seg">${drill}</div>
     ${refreshRow()}
   </section>`;
+}
+
+// A historic season's picks are ~93% recovered, and only the days that
+// reconciled exactly against the spreadsheet are used below. Saying so
+// is the difference between a statistic and a guess.
+function coverageNote(s){
+  if(!s.hasHistory) return "";
+  const seen = s.players.reduce((n,p)=> n + p.played, 0);
+  const days = s.players.reduce((n,p)=> n + p.verifiedDays, 0);
+  const all  = s.players.reduce((n,p)=> n + p.totalDays, 0);
+  return `<div class="chart-card" style="margin-top:12px">
+    <div class="ctitle">What these are built on</div>
+    <div class="sub" style="margin:0 0 10px">
+      Points and the table come from the group's spreadsheet and are exact.
+      Everything below reads individual calls rebuilt from the chat history, and only from the
+      <b>${days} of ${all}</b> player-days that reconciled against the spreadsheet exactly
+      — <b>${seen}</b> calls in all. Days where the record is incomplete are left out rather
+      than guessed at, so a rate here is a rate over what survived.
+    </div></div>`;
 }
 
 // Agreement between every pair, over the fixtures both of them called.
@@ -1304,7 +1440,7 @@ function pickMixChart(s){
   const ps = s.players.filter(p=>p.played>0);
   if(!ps.length) return "";
   const rows = [
-    {name:"Reality", H:pct(s.actual.H,s.total), D:pct(s.actual.D,s.total), A:pct(s.actual.A,s.total)},
+    {name:"Reality", H:pct(s.actual.H,s.fixtureCount), D:pct(s.actual.D,s.fixtureCount), A:pct(s.actual.A,s.fixtureCount)},
     ...ps.map(p=>({name:p.name, H:pct(p.byPick.H.n,p.played), D:pct(p.byPick.D.n,p.played), A:pct(p.byPick.A.n,p.played)}))
   ];
   const W=540, rowH=22, gap=7, leftW=92, plotW=W-leftW-14;
@@ -1339,13 +1475,16 @@ function playerPanel(p, s){
   return `<section class="panel">
     <div class="row" style="margin-bottom:10px"><button class="btn ghost sm" id="backStats" style="flex:0 0 auto">&lsaquo; All stats</button></div>
     <h2>${esc(p.name)}</h2>
-    <div class="sub">${rank}${["st","nd","rd"][rank-1]||"th"} of ${s.players.length} · ${p.correct} from ${p.played}</div>
+    <div class="sub">${rank}${["st","nd","rd"][rank-1]||"th"} of ${s.players.length} · ${p.points} from ${p.scored}${
+      p.hasTruth ? ` · ${p.played} calls recovered` : ""}</div>
     <div class="keys" style="margin-top:14px">
       <div class="key"><div class="big">${p.acc}%</div><div class="lbl">Strike rate</div></div>
       <div class="key"><div class="big">${p.bestStreak}</div><div class="lbl">Longest run</div></div>
       <div class="key"><div class="big">${p.solo}</div><div class="lbl">Right when all others wrong</div></div>
       <div class="key"><div class="big">${p.herdN?pct(p.withHerd,p.herdN):0}%</div><div class="lbl">Voted with the group</div></div>
-      <div class="key"><div class="big">${p.missed}</div><div class="lbl">Deadlines missed</div></div>
+      ${p.hasTruth
+        ? `<div class="key"><div class="big">${pct(p.verifiedDays,p.totalDays)}%</div><div class="lbl">Of this season's days verified</div></div>`
+        : `<div class="key"><div class="big">${p.missed}</div><div class="lbl">Deadlines missed</div></div>`}
     </div>
     <ul class="awards">${PICKS.map(line).join("")}</ul>
     ${bestT.length ? `<ul class="awards">

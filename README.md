@@ -200,7 +200,31 @@ means Supabase Auth.
 
 ---
 
+## Two tiers of truth
+
+The group kept a spreadsheet from 2020 onward, and it is correct. The picks rebuilt from the
+chat exports are about 93% complete. The two are used for different things and never mixed:
+
+- **`pl_history` is the authority on scores.** Points, standings, season totals, the
+  points-through-the-season chart. Loaded from `history.sql` plus the output of
+  `build-history.mjs`.
+- **`pl_predictions` is the authority on picks**, but only on days flagged `verified` —
+  where the reconstruction recovered every fixture of that day *and* independently arrived at
+  the spreadsheet's own number of correct calls. 1,152 of 1,737 player-days qualify.
+
+Everywhere else is a gap: the score still counts, the picks are not reasoned from. A hole in
+"how often do you call a draw" is a wrong answer rather than a missing one, so the Stats tab
+uses verified days only and says so on the page.
+
+For the live season there is no spreadsheet, the app recorded every pick itself, and both
+tiers are the same thing.
+
 ## Notes
+
+- **PostgREST caps every response at 1000 rows.** Six seasons is 2,280 fixtures and ~5,000
+  picks, so `SB.get` pages through with `Range` headers. Every paged read needs a
+  deterministic `order=` including a tiebreak, or rows repeat or vanish across page
+  boundaries.
 
 - **Max 10 players**, enforced in the schema.
 - **No auth.** You pick your name and it sticks to the device, same trust model as the whist
