@@ -94,6 +94,17 @@ what it always did. A live preview highlights each button before you commit; it 
 a string containing typos or one longer than the fixture list. `Copy my string` gives you
 the same thing back for posting to the group.
 
+**One week at a time.** Predict pages by matchweek with prev/next rather than scrolling the
+rest of the season. The bulk box maps onto the week you're looking at, so a string is read
+against the fixtures in front of you.
+
+**Who's called it, not what.** Each row carries the other players' initials — filled once
+they've locked a prediction in, outlined until then. Which way they leaned stays hidden until
+kick-off; the database won't serve it before then regardless.
+
+**The nudge.** Inside 12 hours of a kick-off, anyone still missing a call for it gets named to
+everyone. Chasing people was the one job the group chat was genuinely doing.
+
 **Nobody can peek.** `pl_predictions` has no select policy at all — the REST API simply will
 not serve it. Reads go through the `pl_picks_public` view, which withholds the pick until
 `now() >= kickoff_utc` and exposes only *presence* before that (the little dots on each

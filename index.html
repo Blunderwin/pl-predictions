@@ -138,9 +138,33 @@
   .pk.preview{border-color:var(--mark);color:var(--mark);border-style:dashed}
   .pk[disabled]{opacity:.4;cursor:not-allowed}
 
-  .whodunnit{display:flex;gap:3px;margin-top:4px}
-  .whodunnit span{width:13px;height:2px;background:#333a44}
-  .whodunnit span.in{background:var(--ok)}
+  /* Who has called it, by initial. Never which way. */
+  .whodunnit{display:flex;gap:4px;margin-top:4px}
+  .whodunnit span{font-family:"Space Mono";font-size:9.5px;line-height:1;letter-spacing:.02em;
+    min-width:15px;height:14px;padding:0 3px;display:inline-grid;place-items:center;
+    border:1px solid var(--rule);border-radius:3px;color:#4d5560;background:transparent}
+  .whodunnit span.in{border-color:var(--ok);color:#06180d;background:var(--ok);font-weight:700}
+  .keymark{font-family:"Space Mono";font-size:9.5px;min-width:15px;height:14px;padding:0 3px;
+    display:inline-grid;place-items:center;border:1px solid var(--rule);border-radius:3px;
+    color:#4d5560;vertical-align:middle;margin-right:2px}
+  .keymark.in{border-color:var(--ok);color:#06180d;background:var(--ok);font-weight:700}
+
+  /* Matchweek pager */
+  .weekbar{display:flex;align-items:center;gap:10px;margin:14px 0 0;
+    border:1px solid var(--rule);border-radius:var(--r);padding:6px}
+  .wknav{width:40px;height:38px;flex:0 0 auto;background:transparent;border:1px solid var(--rule);
+    border-radius:var(--r);color:var(--chalk);font-size:19px;line-height:1;transition:.12s}
+  .wknav:hover:not([disabled]){border-color:var(--ash)}
+  .wknav[disabled]{opacity:.25;cursor:not-allowed}
+  .wklabel{flex:1;text-align:center;line-height:1.3}
+  .wklabel b{font-family:"Barlow Condensed";font-size:15px;letter-spacing:.14em;
+    text-transform:uppercase;display:block}
+  .wklabel span{font-size:11.5px;color:var(--ash)}
+
+  /* Deadline nudge */
+  .nudge{margin-top:12px;padding:10px 12px;border:1px solid var(--mark);border-left-width:3px;
+    border-radius:var(--r);background:rgba(217,165,54,.07);font-size:13.5px;line-height:1.5}
+  .nudge b{display:block;font-weight:600;color:var(--mark)}
 
   /* ---------- Tables ---------- */
   .scroller{overflow-x:auto;-webkit-overflow-scrolling:touch}
@@ -343,8 +367,17 @@ const $  = (s,r=document)=>r.querySelector(s);
 const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
 const esc = s => String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const pct = (a,b)=> b ? Math.round(a/b*100) : 0;
-const PICKS = ["H","A","D"];
+const PICKS = ["H","A","D"];                  // accepted letters, any order
+const PICK_ORDER = ["H","D","A"];             // how the buttons sit: home, draw, away
 const PICK_WORD = { H:"Home win", A:"Away win", D:"Draw" };
+
+// Distinct initials for the marker row. One letter each unless two
+// players collide, in which case everyone gets two.
+function initialsFor(names){
+  const one = names.map(n => n.trim().slice(0,1).toUpperCase());
+  const clash = one.some((v,i)=> one.indexOf(v) !== i);
+  return Object.fromEntries(names.map((n,i)=> [n, clash ? n.trim().slice(0,2) : one[i]]));
+}
 
 const fmtTime = iso => new Date(iso).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit", hour12:false});
 const fmtDay  = iso => new Date(iso).toLocaleDateString([], {weekday:"short", day:"numeric", month:"short"});
@@ -425,7 +458,7 @@ const state = {
   season: null,                // active season label
   seasonChosen: false,         // true once the user picks one by hand
   bulk: "",                    // raw text in the bulk box
-  showAll: false,              // predict view: every open fixture vs the next fortnight
+  week: null,                  // matchweek on screen in Predict
   resultsMd: null,             // matchday shown in Results
   statPlayer: null,            // drill-down in Stats
   identityOpen: false,
@@ -449,6 +482,7 @@ function hydrateFromCache(){
   state.fixtures = LS.json(K.fixtures, []).map(f=>f).sort(byKickoff);
   state.picks    = new Map(LS.json(K.picks, []));
   state.history  = LS.json(K.history, []);
+  refreshInitials();
   pickSeason();
 }
 
@@ -499,6 +533,7 @@ async function refresh(quiet){
     state.picks    = new Map(picks.map(p=>[pickKey(p.player_id,p.fixture_id), {pick:p.pick, revealed:p.revealed}]));
     state.history  = history || [];
     pickSeason();
+    refreshInitials();
     prunePending();
     LS.set(K.players,  JSON.stringify(state.players));
     LS.set(K.fixtures, JSON.stringify(state.fixtures));
@@ -540,6 +575,8 @@ function render(){
   if(state.tab==="results"){ app.innerHTML = viewResults(); wireResults(); return; }
   app.innerHTML = viewStats(); wireStats();
 }
+
+function refreshInitials(){ INITIALS = initialsFor(state.players.map(p=>p.name)); }
 
 function renderWhoami(){
   $("#whoami").innerHTML = `<button id="meBtn" title="${state.me?"Account":"Sign in"}">${
@@ -709,6 +746,25 @@ function parseBulk(text){
   return out;
 }
 
+// Matchweeks that still have something to call, earliest first.
+function openWeeks(){
+  return [...new Set(openFixtures().map(f=>f.matchday))].sort((a,b)=>a-b);
+}
+// The week on screen. Defaults to the earliest with anything open, and
+// follows the season along unless you've paged somewhere by hand.
+function currentWeek(){
+  const weeks = openWeeks();
+  if(!weeks.length) return null;
+  return weeks.includes(state.week) ? state.week : weeks[0];
+}
+// The bulk box maps onto the week you're looking at, so a string is
+// read against the fixtures in front of you rather than the whole
+// remaining season.
+function weekFixtures(){
+  const w = currentWeek();
+  return w == null ? [] : openFixtures().filter(f=> f.matchday === w);
+}
+
 function viewPredict(){
   const all = openFixtures();
   if(!all.length){
@@ -717,31 +773,41 @@ function viewPredict(){
       ${dataState()}${refreshRow()}</section>`;
   }
 
-  const horizon = Date.now() + FORTNIGHT;
-  const shown = state.showAll ? all : all.filter(f=> new Date(f.kickoff).getTime() <= horizon);
-  const list  = shown.length ? shown : all.slice(0, 10);
-  const hidden = all.length - list.length;
+  const weeks = openWeeks();
+  const week  = currentWeek();
+  const at    = weeks.indexOf(week);
+  const list  = weekFixtures();
+  const mine  = list.filter(f=>myPick(f.id)).length;
 
-  const mine = list.filter(f=>myPick(f.id)).length;
   const groups = [];
   let last = null;
   list.forEach(f=>{
     const k = dayKey(f.kickoff);
-    if(k !== last){ groups.push({key:k, iso:f.kickoff, md:f.matchday, items:[]}); last = k; }
+    if(k !== last){ groups.push({key:k, iso:f.kickoff, items:[]}); last = k; }
     groups[groups.length-1].items.push(f);
   });
 
   const body = groups.map(g=>`
-    <div class="daybar"><h3>${esc(fmtDay(g.iso))}</h3><span class="md">Matchday ${g.md||"?"}</span></div>
-    ${g.items.map(f=> fixtureRow(f, all.indexOf(f))).join("")}
+    <div class="daybar"><h3>${esc(fmtDay(g.iso))}</h3></div>
+    ${g.items.map(f=> fixtureRow(f, list.indexOf(f))).join("")}
   `).join("");
 
   return `<section class="panel">
     <h2>Predict</h2>
-    <div class="sub">${mine} of ${list.length} called${hidden>0?` · ${hidden} more later in the season`:""}</div>
 
-    <div class="bulk" style="margin-top:14px">
-      <input type="text" id="bulkBox" value="${esc(state.bulk)}" placeholder="HAHHA"
+    <div class="weekbar">
+      <button class="wknav" id="wkPrev" ${at<=0?"disabled":""} aria-label="Previous matchweek">&lsaquo;</button>
+      <div class="wklabel">
+        <b>Matchweek ${week}</b>
+        <span>${mine} of ${list.length} called${weeks.length>1?` · ${weeks.length-at-1} week${weeks.length-at-1===1?"":"s"} ahead`:""}</span>
+      </div>
+      <button class="wknav" id="wkNext" ${at>=weeks.length-1?"disabled":""} aria-label="Next matchweek">&rsaquo;</button>
+    </div>
+
+    ${nudgeBanner()}
+
+    <div class="bulk" style="margin-top:12px">
+      <input type="text" id="bulkBox" value="${esc(state.bulk)}" placeholder="HDHHA"
         autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="60" />
       <div class="hint" id="bulkHint"></div>
       <div class="row" style="margin-top:10px">
@@ -752,9 +818,7 @@ function viewPredict(){
 
     <div style="margin-top:6px">${body}</div>
     ${list.some(moved) ? `<div class="sub" style="margin-top:10px">&dagger; kick-off moved since the fixture was first published.</div>` : ""}
-    ${hidden>0 || state.showAll ? `<div class="row" style="margin-top:14px">
-      <button class="btn ghost sm" id="toggleAll">${state.showAll?"Show next fortnight only":`Show all ${all.length} open fixtures`}</button>
-    </div>` : ""}
+    ${othersKey()}
     ${refreshRow()}
   </section>`;
 }
@@ -775,6 +839,49 @@ function dataState(){
   </div>`;
 }
 
+// Reads the marker row for anyone who hasn't worked it out.
+function othersKey(){
+  const others = state.players.filter(p=>p.id!==state.me);
+  if(!others.length) return "";
+  return `<div class="sub" style="margin-top:10px">
+    ${others.map(p=>`<span class="keymark in">${esc(INITIALS[p.name]||"?")}</span>`).join("")}
+    called &middot;
+    ${others.map(p=>`<span class="keymark">${esc(INITIALS[p.name]||"?")}</span>`).join("")}
+    still to call. Which way stays hidden until kick-off.
+  </div>`;
+}
+
+/* Within 12 hours of a kick-off, anyone still missing a call for it
+   gets named to everyone. Chasing people is the one job the group
+   chat was actually doing, so the app should do it instead. */
+const NUDGE_H = 12;
+function nudgeBanner(){
+  const soon = openFixtures().filter(f =>
+    new Date(f.kickoff).getTime() - Date.now() < NUDGE_H * 3600e3);
+  if(!soon.length) return "";
+
+  const behind = state.players.filter(p =>
+    soon.some(f => !hasPicked(p.id, f.id)));
+  if(!behind.length) return "";
+
+  const first = soon.reduce((a,b)=> new Date(a.kickoff) < new Date(b.kickoff) ? a : b);
+  const mins  = Math.max(0, Math.round((new Date(first.kickoff) - Date.now()) / 60000));
+  const when  = mins < 90 ? `${mins} min` : `${Math.round(mins/60)} hours`;
+  const mineToo = behind.some(p => p.id === state.me);
+  const others  = behind.filter(p => p.id !== state.me).map(p => p.name);
+  const list    = others.length === 1 ? others[0]
+                : others.slice(0,-1).join(", ") + " and " + others[others.length-1];
+
+  const parts = [];
+  if(mineToo) parts.push("You haven't called it yet.");
+  if(others.length) parts.push(`Remind ${esc(list)} to do ${others.length === 1 ? "theirs" : "theirs"}.`);
+
+  return `<div class="nudge">
+    <b>${esc(first.homeShort)} v ${esc(first.awayShort)} kicks off in ${when}.</b>
+    ${parts.join(" ")}
+  </div>`;
+}
+
 function refreshRow(){
   return `<div class="row" style="margin-top:14px">
     <button class="btn ghost sm" id="refreshBtn">Refresh fixtures</button>
@@ -785,14 +892,20 @@ function refreshRow(){
 function fixtureRow(f, idx){
   const mv = moved(f);
   const ko = `<div class="ko${mv?" moved":""}" title="${mv?`Moved from ${esc(fmtDay(f.kickoffOriginal))} ${esc(fmtTime(f.kickoffOriginal))}`:""}">${esc(fmtTime(f.kickoff))}${mv?"&dagger;":""}</div>`;
+  // Who has called it, by initial. Never which way — that stays hidden
+  // until kick-off, which is the whole point of the game.
   const others = state.players.filter(p=>p.id!==state.me);
-  const dots = others.length ? `<div class="whodunnit" title="Who's called it">${
-    others.map(p=>`<span class="${hasPicked(p.id,f.id)?"in":""}"></span>`).join("")}</div>` : "";
+  const marks = others.length ? `<div class="whodunnit">${
+    others.map(p=>{
+      const inYet = hasPicked(p.id, f.id);
+      return `<span class="${inYet?"in":""}" title="${esc(p.name)} ${inYet?"has called it":"hasn't called it yet"}">${esc(INITIALS[p.name]||p.name.slice(0,1))}</span>`;
+    }).join("")}</div>` : "";
+  const dots = marks;
   const cur = myPick(f.id);
   // "?" means the server has a pick from you but won't hand it back
   // before kick-off, and this device wasn't the one that made it.
   const elsewhere = cur === "?" ? `<div class="note">called on another device</div>` : "";
-  const btns = PICKS.map(p=>`<button class="pk" data-fx="${f.id}" data-pick="${p}"
+  const btns = PICK_ORDER.map(p=>`<button class="pk" data-fx="${f.id}" data-pick="${p}"
       aria-pressed="${cur===p}" aria-label="${PICK_WORD[p]}" title="${PICK_WORD[p]}">${p}</button>`).join("");
   return `<div class="fx" data-fxrow="${f.id}" data-idx="${idx}">
     ${ko}
@@ -804,7 +917,9 @@ function fixtureRow(f, idx){
 function wirePredict(){
   wireCommon();
   $$(".pk").forEach(b=> b.onclick = ()=> savePick(b.dataset.fx, b.dataset.pick));
-  $("#toggleAll") && ($("#toggleAll").onclick = ()=>{ state.showAll=!state.showAll; render(); });
+  const weeks = openWeeks(), at = weeks.indexOf(currentWeek());
+  $("#wkPrev") && ($("#wkPrev").onclick = ()=>{ if(at>0){ state.week = weeks[at-1]; state.bulk=""; render(); } });
+  $("#wkNext") && ($("#wkNext").onclick = ()=>{ if(at<weeks.length-1){ state.week = weeks[at+1]; state.bulk=""; render(); } });
 
   const box = $("#bulkBox");
   if(!box) return;
@@ -819,12 +934,13 @@ function wirePredict(){
   if(!state.bulk && !bulkFocused){ box.focus({preventScroll:true}); bulkFocused = true; }
 }
 let bulkFocused = false;
+let INITIALS = {};
 
 // Paints the parsed string onto the fixture rows without re-rendering,
 // so the input keeps focus and the caret while you type.
 function paintBulk(){
   const letters = parseBulk(state.bulk);
-  const all = openFixtures();
+  const all = weekFixtures();
   $$(".pk").forEach(b=> b.classList.remove("preview"));
   let applied = 0, bad = 0;
   letters.forEach((ch, i)=>{
@@ -838,13 +954,13 @@ function paintBulk(){
   const over = Math.max(0, letters.length - all.length);
   const hint = $("#bulkHint"), apply = $("#bulkApply");
   if(!letters.length){
-    hint.innerHTML = `One letter per fixture, in the order below. <b class="tally">_</b> skips one.`;
+    hint.innerHTML = `One letter per fixture in this week, in the order below. <b class="tally">_</b> skips one.`;
     apply.disabled = true;
   }else if(bad){
     hint.innerHTML = `<span class="bad">Only H, A, D and _ please — ${bad} character${bad===1?"":"s"} won't map.</span>`;
     apply.disabled = true;
   }else if(over){
-    hint.innerHTML = `<span class="bad">${letters.length} letters but only ${all.length} fixtures open — ${over} too many.</span>`;
+    hint.innerHTML = `<span class="bad">${letters.length} letters but only ${all.length} still to call this week — ${over} too many.</span>`;
     apply.disabled = true;
   }else{
     const offscreen = letters.length - $$(".fx").length;
@@ -858,7 +974,7 @@ function paintBulk(){
 
 async function applyBulk(){
   const letters = parseBulk(state.bulk);
-  const all = openFixtures();
+  const all = weekFixtures();
   const rows = [];
   letters.forEach((ch,i)=>{ if(ch && ch!=="!" && i<all.length) rows.push({fixture:all[i], pick:ch}); });
   if(!rows.length) return;
@@ -927,7 +1043,7 @@ function wireCommon(){
   });
   $("#refreshBtn") && ($("#refreshBtn").onclick = ()=> refresh(false));
   $("#copyBtn") && ($("#copyBtn").onclick = ()=>{
-    const all = openFixtures();
+    const all = weekFixtures();
     const s = all.map(f=> myPick(f.id) || "_").join("").replace(/_+$/,"");
     if(!s) return toast("Nothing to copy yet.");
     navigator.clipboard?.writeText(s).then(()=> toast("Copied: " + s), ()=> toast(s));
