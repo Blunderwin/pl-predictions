@@ -112,12 +112,32 @@ for(const y of SEASONS){
 fixtures.sort((a, b) => new Date(a.kickoff_utc) - new Date(b.kickoff_utc) || a.home.localeCompare(b.home));
 const seasonAt = d => (windows.find(w => d >= w.from && d <= w.to) || {}).label || null;
 
+// A break in the fixture list means the league has stopped and the
+// group is predicting something else — Qatar 2022 sat inside the
+// 2022/23 season, and those calls would otherwise be mapped onto
+// whatever Premier League match happened to be next.
+const BREAK_DAYS = 25;   // international breaks run ~13 days; Qatar 2022 stopped the league for 43
+const breaks = [];
+for(let i = 1; i < fixtures.length; i++){
+  const prev = new Date(fixtures[i-1].kickoff_utc), next = new Date(fixtures[i].kickoff_utc);
+  if(fixtures[i].season !== fixtures[i-1].season) continue;
+  if(next - prev > BREAK_DAYS * 24*3600e3) breaks.push({ from:prev, to:next });
+}
+if(breaks.length) console.log(`  mid-season breaks ignored: ${breaks.map(b=>`${b.from.toISOString().slice(0,10)}..${b.to.toISOString().slice(0,10)}`).join(", ")}`);
+const inBreak = d => breaks.some(b => d > b.from && d < b.to);
+
 const nameMap = MAPF ? JSON.parse(readFileSync(MAPF, "utf8")) : {};
 const who = a => nameMap[a] || a;
 
 const rows = [], report = [["status","when","season","author","message","fixture","kickoff","pick","result"].join("\t")];
-const counts = { chat:0, offSeason:0, tooLong:0, overrun:0, laughter:0, chanting:0, single:0, ok:0 };
+const counts = { chat:0, offSeason:0, inBreak:0, tooLong:0, overrun:0, laughter:0, chanting:0, single:0, ok:0 };
 const posters = new Set();
+// Every message maps from the next open fixture, including ones the
+// author has already called. Continuing from where they left off was
+// tried and is measurably worse against the group's own spreadsheet:
+// the group reposts corrected strings often, and under continuation a
+// repost consumes the *following* fixtures instead of overwriting,
+// inventing predictions. Restarting means a repost simply supersedes.
 
 for(const msg of messages){
   const picks = asPicks(msg.text);
@@ -127,6 +147,11 @@ for(const msg of messages){
   if(!season){
     counts.offSeason++;
     report.push(["OFF-SEASON", iso(msg.ts), "", who(msg.author), flat(msg.text), "", "", "", ""].join("\t"));
+    continue;
+  }
+  if(inBreak(msg.ts)){
+    counts.inBreak++;
+    report.push(["MID-SEASON-BREAK", iso(msg.ts), season, who(msg.author), flat(msg.text), "", "", "", ""].join("\t"));
     continue;
   }
   if(picks.length > MAX_RUN){
@@ -143,7 +168,7 @@ for(const msg of messages){
 
   const openAt = fixtures.filter(f => new Date(f.kickoff_utc) > msg.ts && f.season === season);
   picks.forEach((pick, i) => {
-    if(!pick) return;
+    if(!pick) return;                                   // "_" skips a fixture
     const f = openAt[i];
     if(!f){
       counts.overrun++;
@@ -167,6 +192,7 @@ writeFileSync(OUT, report.join("\n"));
 
 console.log(`\nignored as chat: ${counts.chat}`);
 console.log(`dropped, outside a season window: ${counts.offSeason}`);
+console.log(`dropped, inside a mid-season break: ${counts.inBreak}`);
 console.log(`dropped, longer than ${MAX_RUN} picks: ${counts.tooLong}`);
 console.log(`picks running past the end of a season: ${counts.overrun}`);
 console.log(`flagged — laughter ${counts.laughter}, chanting ${counts.chanting}, lone letter ${counts.single}`);

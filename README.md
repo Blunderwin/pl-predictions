@@ -144,6 +144,23 @@ It writes three files and touches nothing:
 The SQL exists so the load goes through an already-authenticated surface rather than needing
 the service key in a shell. It matches players by name and is re-runnable.
 
+### Checking it
+
+The group's own spreadsheet records, per day per season, how many each player got right. That
+makes it a checksum for the import — a misaligned string produces perfectly plausible picks
+and nothing complains.
+
+```bash
+node scripts/verify-against-sheet.mjs "PL Match Predictions.xlsx" chat-import-report.tsv
+```
+
+The number to read is the last one: of the player-days where the import recovered *every*
+fixture of that day, how many match the sheet exactly. Below about 95% means the mapping is
+wrong rather than merely incomplete. It caught two real faults — the 2022 World Cup being
+mapped onto Premier League fixtures, and an attempt to have each message continue from where
+the player left off, which turned out measurably worse because the group reposts corrected
+strings.
+
 Read the strike rates it prints before loading anything. H/A/D calls land near 40–55%; a
 player well outside that has misaligned strings, not bad luck.
 
