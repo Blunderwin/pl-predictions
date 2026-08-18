@@ -136,6 +136,29 @@ laughter ("hahaha" is a legal five-match call) and lone letters for a manual loo
 
 ---
 
+## Signing in
+
+Each player has a four-digit code. The codes are checked in the database, never in the page:
+anon has no SELECT on `pl_players` at all and reads the roster through `pl_players_public`,
+which exposes id and name only. The code travels with every write, because knowing a
+player's id isn't enough on its own — ids are visible in the picks view.
+
+Run `add-logins.sql` after `schema.sql` and `fix-write-path.sql`. Change the four digits in
+the bootstrap line before you run it; that's the only code typed by hand.
+
+Only an admin can create players. From your account panel: type a name, hit Create, and the
+generated code appears once on screen — send it on. *Show everyone's codes* reads them back
+if someone loses theirs. Non-admins never see either control, and the functions behind them
+re-check the admin flag server-side, so hiding the buttons isn't what's doing the work.
+
+**This is not real authentication.** The anon key is public, the login function is callable
+by anyone, and there are only 10,000 codes. A 0.4s pause on every failed attempt turns a
+brute force into roughly a 90-minute job rather than a two-second one. That's the right
+amount of effort for a game between friends; it is not a security boundary. Anything more
+means Supabase Auth.
+
+---
+
 ## Notes
 
 - **Max 10 players**, enforced in the schema.

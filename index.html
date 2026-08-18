@@ -281,7 +281,8 @@ const LS = {
   del(k){ try { localStorage.removeItem(k); } catch { mem.delete(k); } },
   json(k,fb){ const r=this.get(k); if(!r) return fb; try{ return JSON.parse(r); }catch{ this.del(k); return fb; } }
 };
-const K = { me:"pl_me", pending:"pl_pending", fixtures:"pl_cache_fixtures", players:"pl_cache_players", picks:"pl_cache_picks" };
+const K = { me:"pl_me", pin:"pl_pin", name:"pl_name", admin:"pl_admin", pending:"pl_pending",
+            fixtures:"pl_cache_fixtures", players:"pl_cache_players", picks:"pl_cache_picks" };
 
 /* Dependency-free PostgREST client. Same shape as the whist app's
    adapter: reads fall back to the local mirror, writes go through
@@ -391,6 +392,12 @@ const state = {
   picks: new Map(),            // "playerId|fixtureId" -> {pick|null, revealed}
   pending: {},                 // fixtureId -> "H"|"A"|"D"  (mine, pre-kick-off, local only)
   me: null,                    // player id
+  pin: null,                   // this device's four digits, sent with every write
+  myName: null,
+  isAdmin: false,
+  loginName: null,             // name selected on the sign-in screen
+  newPlayer: null,             // {name, pin} just created, held so a re-render keeps it on screen
+  rosterCodes: null,           // admin's code list, same reason
   season: null,                // active season label
   bulk: "",                    // raw text in the bulk box
   showAll: false,              // predict view: every open fixture vs the next fortnight
@@ -402,6 +409,10 @@ const state = {
 
 async function boot(){
   state.me = LS.get(K.me);
+  state.pin = LS.get(K.pin);
+  state.myName = LS.get(K.name);
+  state.isAdmin = !!LS.get(K.admin);
+  if(!state.pin) state.me = null;              // a device without a code isn't signed in
   state.pending = LS.json(K.pending, {});
   hydrateFromCache();
   render();
@@ -435,7 +446,7 @@ async function refresh(quiet){
   $("#storeBadge").textContent = "Syncing…";
   try{
     const [players, fixtures, picks] = await Promise.all([
-      SB.get("pl_players?select=id,name&order=name.asc"),
+      SB.get("pl_players_public?select=id,name&order=name.asc"),
       SB.get("pl_fixtures?select=*&order=kickoff_utc.asc"),
       SB.get("pl_picks_public?select=player_id,fixture_id,pick,revealed")
     ]);
@@ -485,58 +496,150 @@ function render(){
 }
 
 function renderWhoami(){
-  const me = state.players.find(p=>p.id===state.me);
-  $("#whoami").innerHTML = `<button id="meBtn" title="Change player">
-      <span class="dot"></span>${esc(me ? me.name : "Who are you?")}</button>`;
+  $("#whoami").innerHTML = `<button id="meBtn" title="${state.me?"Account":"Sign in"}">${
+      esc(state.me ? (state.myName || "Account") : "Sign in")}</button>`;
   $("#meBtn").onclick = ()=>{ state.identityOpen = !state.identityOpen; render(); };
 }
 
 /* ---------------------------------------------------------------
    6. IDENTITY
+   A four-digit code per player, checked in the database. The code is
+   held on the device and sent with every write, because knowing a
+   player's id isn't enough — ids are visible in the picks view, so
+   without the code anyone could write as anyone.
    --------------------------------------------------------------- */
 function viewIdentity(){
-  const full = state.players.length >= CONFIG.maxPlayers;
   const chips = state.players.map(p=>
-    `<button data-pid="${esc(p.id)}" aria-pressed="${p.id===state.me}">${esc(p.name)}</button>`).join("");
+    `<button data-name="${esc(p.name)}" aria-pressed="${p.name===state.loginName}">${esc(p.name)}</button>`).join("");
+
+  const admin = state.isAdmin ? `
+    <h3 class="sect">Add a player</h3>
+    <div class="sub">Their code is generated here and shown once. Send it to them.</div>
+    <div class="row" style="margin-top:10px">
+      <input type="text" id="newName" maxlength="18" placeholder="Name" autocomplete="off" />
+      <button class="btn sm" id="addPlayer" style="flex:0 0 auto">Create</button>
+    </div>
+    ${state.newPlayer ? `<div class="chart-card" style="text-align:center;margin-top:12px">
+      <div class="ctitle">${esc(state.newPlayer.name)}</div>
+      <div class="mono" style="font-size:34px;letter-spacing:.4em;color:var(--mark)">${esc(state.newPlayer.pin)}</div>
+      <div class="sub" style="margin-bottom:10px">Send them this code. Show everyone&rsquo;s codes below if it gets lost.</div>
+    </div>` : ""}
+    <div class="row" style="margin-top:12px">
+      <button class="btn ghost sm" id="showRoster">${state.rosterCodes ? "Hide codes" : "Show everyone's codes"}</button>
+    </div>
+    ${state.rosterCodes ? `<ul class="awards">${state.rosterCodes.map(r=>
+      `<li><span>${esc(r.name)}</span><span class="pts">${esc(r.pin||"not set")}</span></li>`).join("")}</ul>` : ""}` : "";
+
+  if(state.me){
+    return `<section class="panel">
+      <h2>Signed in</h2>
+      <div class="sub">${esc(state.myName||"")}${state.isAdmin?" · admin":""} on this device.</div>
+      <div class="row" style="margin-top:14px">
+        <button class="btn ghost" id="closeId">Back</button>
+        <button class="btn ghost" id="signOut">Sign out</button>
+      </div>
+      ${admin}
+    </section>`;
+  }
+
   return `<section class="panel">
-    <h2>Who's predicting?</h2>
-    <div class="sub">Pick your name. It stays on this device.</div>
+    <h2>Sign in</h2>
+    <div class="sub">Your name and your four-digit code.</div>
     <div class="namelist">${chips || '<span class="empty">Nobody on the books yet.</span>'}</div>
-    ${full ? `<div class="sub">Roster's full at ${CONFIG.maxPlayers}.</div>` : `
-      <label class="fld" for="newName">Add a player</label>
-      <div class="row">
-        <input type="text" id="newName" maxlength="18" placeholder="Name" autocomplete="off" />
-        <button class="btn sm" id="addPlayer" style="flex:0 0 auto">Add</button>
-      </div>`}
-    ${state.me ? `<div class="row" style="margin-top:16px"><button class="btn ghost" id="closeId">Done</button></div>` : ""}
+    <label class="fld" for="pinBox">Code</label>
+    <input type="text" id="pinBox" inputmode="numeric" pattern="[0-9]*" maxlength="4"
+      autocomplete="off" placeholder="&bull;&bull;&bull;&bull;"
+      style="font-family:'Space Mono';font-size:24px;letter-spacing:.7em;text-align:center;text-indent:.7em" />
+    <div class="row" style="margin-top:12px"><button class="btn" id="signIn" disabled>Sign in</button></div>
   </section>`;
 }
 
 function wireIdentity(){
   $$(".namelist button").forEach(b=> b.onclick = ()=>{
-    state.me = b.dataset.pid;
-    LS.set(K.me, state.me);
-    state.identityOpen = false;
+    state.loginName = b.dataset.name;
+    $$(".namelist button").forEach(x=> x.setAttribute("aria-pressed", x===b));
+    $("#pinBox")?.focus();
+    refreshSignIn();
+  });
+
+  const pin = $("#pinBox");
+  if(pin){
+    pin.oninput = ()=>{ pin.value = pin.value.replace(/\D/g,"").slice(0,4); refreshSignIn(); };
+    pin.onkeydown = e => { if(e.key==="Enter" && !$("#signIn").disabled) signIn(); };
+    $("#signIn").onclick = signIn;
+    if(state.loginName) pin.focus();
+  }
+
+  $("#closeId") && ($("#closeId").onclick = ()=>{
+    state.identityOpen=false; state.newPlayer=null; state.rosterCodes=null; render();
+  });
+  $("#signOut") && ($("#signOut").onclick = ()=>{
+    // Local only: the picks stay on the server, this device just forgets who it is.
+    state.me = null; state.pin = null; state.myName = null; state.isAdmin = false;
+    state.pending = {}; state.loginName = null; state.newPlayer = null; state.rosterCodes = null;
+    [K.me, K.pin, K.name, K.admin, K.pending].forEach(k=> LS.del(k));
     render();
   });
-  $("#closeId") && ($("#closeId").onclick = ()=>{ state.identityOpen=false; render(); });
+
   const add = $("#addPlayer");
-  if(!add) return;
-  add.onclick = async ()=>{
-    const name = ($("#newName").value||"").trim();
-    if(!name) return;
-    if(state.players.some(p=>p.name.toLowerCase()===name.toLowerCase())) return toast("That name's taken.", true);
-    add.disabled = true;
+  if(add){
+    add.onclick = async ()=>{
+      const name = ($("#newName").value||"").trim();
+      if(!name) return;
+      add.disabled = true;
+      try{
+        const rows = await SB.rpc("pl_create_player", { p_admin:state.me, p_admin_pin:state.pin, p_name:name });
+        state.newPlayer = (rows||[])[0] || null;
+        state.rosterCodes = null;
+        await refresh(true);        // re-renders; newPlayer is in state so it survives
+      }catch(e){
+        console.warn(e);
+        toast(rpcMessage(e) || "Couldn't create that player.", true);
+      }
+      add.disabled = false;
+    };
+    $("#newName").onkeydown = e => { if(e.key==="Enter") add.click(); };
+  }
+
+  $("#showRoster") && ($("#showRoster").onclick = async ()=>{
+    if(state.rosterCodes){ state.rosterCodes = null; render(); return; }
     try{
-      const res = await SB.post("pl_players", [{name}], "return=representation");
-      const row = (await res.json())[0];
-      state.players.push(row);
-      state.me = row.id; LS.set(K.me, state.me);
-      state.identityOpen = false;
+      state.rosterCodes = await SB.rpc("pl_roster", { p_admin:state.me, p_admin_pin:state.pin }) || [];
       render();
-    }catch(e){ console.warn(e); toast("Couldn't add that player.", true); add.disabled=false; }
-  };
-  $("#newName").onkeydown = e => { if(e.key==="Enter") add.click(); };
+    }catch(e){ toast(rpcMessage(e) || "Couldn't read the roster.", true); }
+  });
+}
+
+function refreshSignIn(){
+  const btn = $("#signIn"), pin = $("#pinBox");
+  if(btn) btn.disabled = !(state.loginName && pin && pin.value.length === 4);
+}
+
+async function signIn(){
+  const btn = $("#signIn");
+  btn.disabled = true;
+  const code = $("#pinBox").value;
+  try{
+    const rows = await SB.rpc("pl_login", { p_name:state.loginName, p_pin:code });
+    const me = (rows||[])[0];
+    if(!me){ toast("That code doesn't match.", true); $("#pinBox").value=""; refreshSignIn(); return; }
+    state.me = me.id; state.pin = code; state.myName = me.name; state.isAdmin = !!me.is_admin;
+    LS.set(K.me, me.id); LS.set(K.pin, code); LS.set(K.name, me.name);
+    LS.set(K.admin, me.is_admin ? "1" : "");
+    state.identityOpen = false;
+    state.pending = {}; LS.del(K.pending);       // pending picks belong to whoever was here before
+    render();
+  }catch(e){
+    console.warn("login failed:", e);
+    toast("Couldn't reach the database.", true);
+    refreshSignIn();
+  }
+}
+
+// PostgREST wraps a RAISE in a JSON body; pull the message back out.
+function rpcMessage(e){
+  const m = String(e).match(/"message":"([^"]+)"/);
+  return m ? m[1] : null;
 }
 
 /* ---------------------------------------------------------------
@@ -731,7 +834,7 @@ async function savePick(fixtureId, pick){
 // row, so a fixture that started while the page was open is rejected
 // there rather than trusted from here.
 async function sendPicks(rows){
-  if(!state.me) { toast("Pick your name first.", true); return false; }
+  if(!state.me || !state.pin) { state.identityOpen = true; render(); return false; }
   const live = rows.filter(r=> open(r.fixture));
   if(live.length < rows.length) toast("Some of those have kicked off — skipped.", true);
   if(!live.length) return false;
@@ -739,7 +842,7 @@ async function sendPicks(rows){
   LS.set(K.pending, JSON.stringify(state.pending));
   try{
     const verdicts = await SB.rpc("pl_predict_batch", {
-      p_player: state.me,
+      p_player: state.me, p_pin: state.pin,
       p_picks: live.map(r=>({ fixture_id: r.fixture.id, pick: r.pick }))
     }) || [];
     const refused = verdicts.filter(v=> !v.ok);
@@ -759,9 +862,14 @@ async function sendPicks(rows){
     console.warn("sendPicks failed:", e);
     live.forEach(r=> delete state.pending[r.fixture.id]);
     LS.set(K.pending, JSON.stringify(state.pending));
-    toast(String(e).includes("PGRST202")
-      ? "The database is missing pl_predict_batch — run fix-write-path.sql."
-      : "Couldn't save: " + String(e).replace(/^Error:s*/, "").slice(0, 120), true);
+    if(String(e).includes("P0003")){
+      state.identityOpen = true;                 // code no longer valid — sign in again
+      toast("Your code was rejected. Sign in again.", true);
+    }else{
+      toast(String(e).includes("PGRST202")
+        ? "The database is missing pl_predict_batch — run add-logins.sql."
+        : "Couldn't save: " + (rpcMessage(e) || String(e).replace(/^Error:s*/, "")).slice(0, 120), true);
+    }
     return false;
   }
 }
