@@ -80,17 +80,46 @@ language sql stable security definer set search_path = public as $$
   );
 $$;
 
--- Deliberately NO select policy on the base table. Anon reads go
--- through pl_picks_public below, which withholds the pick itself
--- until kick-off. Without this, anyone could read the group's calls
--- straight off the REST endpoint before the deadline.
-drop policy if exists "anon predict before kickoff" on pl_predictions;
-drop policy if exists "anon amend before kickoff"   on pl_predictions;
-create policy "anon predict before kickoff" on pl_predictions for insert
-  with check (pl_still_open(fixture_id));
-create policy "anon amend before kickoff" on pl_predictions for update
-  using (pl_still_open(fixture_id))
-  with check (pl_still_open(fixture_id));
+-- pl_predictions carries RLS with NO policies at all, which is the
+-- strongest statement available: anon can neither read it nor write it
+-- directly. Reads go through pl_picks_public, which withholds the pick
+-- until kick-off; writes go through pl_predict_batch, which enforces
+-- the deadline and reports per fixture what it accepted. Granting anon
+-- a direct upsert instead makes the write depend on how PostgREST
+-- happens to phrase the statement against a table with no SELECT
+-- policy, which fails in ways that are hard to read.
+revoke insert, update, delete on pl_predictions from anon, authenticated;
+
+create or replace function pl_predict_batch(p_player uuid, p_picks jsonb)
+returns table (fixture_id bigint, accepted boolean, reason text)
+language plpgsql security definer set search_path = public as $fn$
+declare item jsonb; fid bigint; pk text;
+begin
+  if not exists (select 1 from pl_players where id = p_player) then
+    raise exception 'unknown player %', p_player using errcode = 'P0002';
+  end if;
+  for item in select * from jsonb_array_elements(p_picks) loop
+    fid := (item->>'fixture_id')::bigint;
+    pk  := upper(item->>'pick');
+    if pk not in ('H','A','D') then
+      fixture_id := fid; accepted := false; reason := 'not H, A or D'; return next; continue;
+    end if;
+    if not exists (select 1 from pl_fixtures where id = fid) then
+      fixture_id := fid; accepted := false; reason := 'no such fixture'; return next; continue;
+    end if;
+    if not pl_still_open(fid) then
+      fixture_id := fid; accepted := false; reason := 'kicked off'; return next; continue;
+    end if;
+    insert into pl_predictions (player_id, fixture_id, pick)
+    values (p_player, fid, pk::char(1))
+    on conflict (player_id, fixture_id) do update set pick = excluded.pick, updated_at = now();
+    fixture_id := fid; accepted := true; reason := null; return next;
+  end loop;
+end;
+$fn$;
+
+revoke all on function pl_predict_batch(uuid, jsonb) from public;
+grant execute on function pl_predict_batch(uuid, jsonb) to anon, authenticated;
 
 create or replace function pl_touch() returns trigger
 language plpgsql as $$ begin new.updated_at := now(); return new; end $$;

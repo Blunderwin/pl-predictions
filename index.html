@@ -295,6 +295,14 @@ const SB = {
     if(!res.ok) throw new Error("HTTP "+res.status+" "+(await res.text()));
     return res.json();
   },
+  async rpc(fn, args){
+    const res = await fetch(this._url("rpc/" + fn), {
+      method:"POST", headers:this._h(), body:JSON.stringify(args)
+    });
+    const text = await res.text();
+    if(!res.ok) throw new Error("HTTP "+res.status+" "+text);
+    return text ? JSON.parse(text) : null;
+  },
   async post(path, body, prefer){
     const res = await fetch(this._url(path), {
       method:"POST", headers:this._h({ Prefer: prefer || "return=minimal" }), body:JSON.stringify(body)
@@ -727,28 +735,33 @@ async function sendPicks(rows){
   const live = rows.filter(r=> open(r.fixture));
   if(live.length < rows.length) toast("Some of those have kicked off — skipped.", true);
   if(!live.length) return false;
-  const body = live.map(r=>({ player_id: state.me, fixture_id: r.fixture.id, pick: r.pick }));
   live.forEach(r=> state.pending[r.fixture.id] = r.pick);
   LS.set(K.pending, JSON.stringify(state.pending));
   try{
-    await SB.post("pl_predictions?on_conflict=player_id,fixture_id", body,
-      "resolution=merge-duplicates,return=minimal");
-    live.forEach(r=> state.picks.set(pickKey(state.me, r.fixture.id), {pick:null, revealed:false}));
+    const verdicts = await SB.rpc("pl_predict_batch", {
+      p_player: state.me,
+      p_picks: live.map(r=>({ fixture_id: r.fixture.id, pick: r.pick }))
+    }) || [];
+    const refused = verdicts.filter(v=> !v.accepted);
+    verdicts.filter(v=> v.accepted).forEach(v=>
+      state.picks.set(pickKey(state.me, v.fixture_id), {pick:null, revealed:false}));
+    refused.forEach(v=> delete state.pending[v.fixture_id]);
+    LS.set(K.pending, JSON.stringify(state.pending));
     LS.set(K.picks, JSON.stringify([...state.picks]));
-    return true;
+    if(refused.length){
+      const f = state.fixtures.find(x=> String(x.id)===String(refused[0].fixture_id));
+      toast(refused.length === 1 && f
+        ? `${f.homeShort} v ${f.awayShort}: ${refused[0].reason}.`
+        : `${refused.length} refused — ${refused[0].reason}.`, true);
+    }
+    return refused.length < live.length;
   }catch(e){
     console.warn("sendPicks failed:", e);
     live.forEach(r=> delete state.pending[r.fixture.id]);
     LS.set(K.pending, JSON.stringify(state.pending));
-    const msg = String(e);
-    const rls = msg.includes("42501") || msg.includes("row-level");
-    const late = rls && live.some(r=> !open(r.fixture));
-    toast(late ? "Too late — that one's kicked off."
-        : rls ? "The database refused that write. Check the Predict tab's fixture summary."
-        : "Couldn't save. Check your connection.", true);
-    if(rls) console.warn("RLS rejection. Server clock vs fixture:",
-      live.map(r=>({fixture:`${r.fixture.homeShort} v ${r.fixture.awayShort}`,
-                    kickoff:r.fixture.kickoff, status:r.fixture.status, deviceNow:new Date().toISOString()})));
+    toast(String(e).includes("PGRST202")
+      ? "The database is missing pl_predict_batch — run fix-write-path.sql."
+      : "Couldn't save: " + String(e).replace(/^Error:s*/, "").slice(0, 120), true);
     return false;
   }
 }
