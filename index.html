@@ -598,6 +598,14 @@ function pickSeason(){
 
 // Shown on every retrospective view once there's more than one season
 // on file, which is the case as soon as the history is backfilled.
+// The selector only ever offers leagues you belong to. An admin holds
+// the full list for the management panel, but is still ranked in their
+// own leagues like everyone else.
+function myLeagues(){
+  return state.leagues.filter(l =>
+    state.members.some(m => m.league_id === l.id && m.player_id === state.me));
+}
+
 function seasonSeg(){
   const seasons = allSeasons();
   if(seasons.length < 2) return "";
@@ -611,7 +619,7 @@ function seasonSeg(){
 async function refresh(quiet){
   $("#storeBadge").textContent = "Syncing…";
   try{
-    const [players, fixtures, picks, history, own, leagues, members] = await Promise.all([
+    const [players, fixtures, picks, history, own, leagueRows] = await Promise.all([
       SB.get("pl_players_public?select=id,name&order=name.asc"),
       SB.get("pl_fixtures?select=*&order=kickoff_utc.asc,id.asc"),
       SB.get("pl_picks_public?select=player_id,fixture_id,pick,revealed&order=fixture_id.asc,player_id.asc"),
@@ -621,16 +629,25 @@ async function refresh(quiet){
       (state.me && state.pin)
         ? SB.rpc("pl_my_picks", { p_player:state.me, p_pin:state.pin }).catch(()=>null)
         : null,
-      SB.get("pl_leagues?select=id,name,starts_on,sort&order=sort.asc").catch(()=>[]),
-      SB.get("pl_league_members?select=league_id,player_id").catch(()=>[])
+      (state.me && state.pin)
+        ? SB.rpc(state.isAdmin ? "pl_all_leagues" : "pl_my_leagues",
+            state.isAdmin ? { p_admin:state.me, p_admin_pin:state.pin }
+                          : { p_player:state.me, p_pin:state.pin }).catch(()=>[])
+        : []
     ]);
     state.players  = players;
     state.fixtures = fixtures.map(rowToFixture).sort(byKickoff);
     state.picks    = new Map(picks.map(p=>[pickKey(p.player_id,p.fixture_id), {pick:p.pick, revealed:p.revealed}]));
     state.history  = history || [];
     if(own) state.myPicks = Object.fromEntries(own.map(r => [r.fixture_id, r.pick]));
-    state.leagues = leagues || [];
-    state.members = members || [];
+    // One row per (league, member); fold it back into the two shapes
+    // the rest of the app expects.
+    const rows = leagueRows || [];
+    const seen = new Map();
+    rows.forEach(r => seen.has(r.league_id) || seen.set(r.league_id,
+      { id:r.league_id, name:r.name, starts_on:r.starts_on, sort:r.sort }));
+    state.leagues = [...seen.values()].sort((a,b)=> a.sort - b.sort || a.name.localeCompare(b.name));
+    state.members = rows.filter(r => r.player_id).map(r => ({ league_id:r.league_id, player_id:r.player_id }));
     pickLeague();
     pickSeason();
     refreshInitials();
@@ -786,8 +803,9 @@ function wireIdentity(){
   $("#signOut") && ($("#signOut").onclick = ()=>{
     // Local only: the picks stay on the server, this device just forgets who it is.
     state.me = null; state.pin = null; state.myName = null; state.isAdmin = false;
-    state.pending = {}; state.loginName = null; state.newPlayer = null; state.rosterCodes = null;
-    [K.me, K.pin, K.name, K.admin, K.pending].forEach(k=> LS.del(k));
+    state.loginName = null; state.newPlayer = null; state.rosterCodes = null;
+    forgetPlayer();
+    [K.me, K.pin, K.name, K.admin].forEach(k=> LS.del(k));
     render();
   });
 
@@ -845,6 +863,17 @@ function wireIdentity(){
   });
 }
 
+// Wipes everything that belonged to the player who was signed in.
+function forgetPlayer(){
+  state.pending = {};
+  state.myPicks = {};
+  state.leagues = [];
+  state.members = [];
+  state.league = null;
+  state.leagueChosen = false;
+  [K.pending, K.mine, K.leagues, K.members, K.league].forEach(k => LS.del(k));
+}
+
 function refreshSignIn(){
   const btn = $("#signIn"), pin = $("#pinBox");
   if(btn) btn.disabled = !(state.loginName && pin && pin.value.length === 4);
@@ -862,8 +891,9 @@ async function signIn(){
     LS.set(K.me, me.id); LS.set(K.pin, code); LS.set(K.name, me.name);
     LS.set(K.admin, me.is_admin ? "1" : "");
     state.identityOpen = false;
-    state.pending = {}; LS.del(K.pending);       // pending picks belong to whoever was here before
+    forgetPlayer();                              // whoever was signed in before
     render();
+    await refresh(true);                         // their leagues and their own picks, not the last person's
   }catch(e){
     console.warn("login failed:", e);
     toast("Couldn't reach the database.", true);
@@ -1390,19 +1420,17 @@ function leagueFrom(){
   return l && l.starts_on ? new Date(l.starts_on + "T00:00:00Z") : null;
 }
 function pickLeague(){
-  if(state.leagueChosen && (state.league === null || leagueById(state.league))) return;
-  if(!state.leagues.length){ state.league = null; return; }
-  // Default to the first league you're actually in.
-  const mine = state.leagues.find(l =>
-    state.members.some(m => m.league_id === l.id && m.player_id === state.me));
-  state.league = (mine || state.leagues[0]).id;
+  const mine = myLeagues();
+  // A league you've left, or never had, can't stay selected.
+  if(state.leagueChosen && (state.league === null ? state.isAdmin : mine.some(l => l.id === state.league))) return;
+  state.league = mine.length ? mine[0].id : null;
 }
 function leagueSeg(){
-  if(state.leagues.length < 2) return "";
+  if(myLeagues().length + (state.isAdmin ? 1 : 0) < 2) return "";
   return `<div class="seg">
-    ${state.leagues.map(l =>
+    ${myLeagues().map(l =>
       `<button class="btn sm ghost segbtn" data-league="${esc(l.id)}" aria-pressed="${l.id===state.league}">${esc(l.name)}</button>`).join("")}
-    <button class="btn sm ghost segbtn" data-league="" aria-pressed="${state.league===null}">Everyone</button>
+    ${state.isAdmin ? `<button class="btn sm ghost segbtn" data-league="" aria-pressed="${state.league===null}">Everyone</button>` : ""}
   </div>`;
 }
 

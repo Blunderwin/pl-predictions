@@ -281,6 +281,12 @@ Table, Results and Stats. *Everyone* ignores membership entirely.
 It defaults to the first league by sort order that you're a member of, which is OG
 Predictions. The choice sticks to the device.
 
+**You only see leagues you're in.** `pl_leagues` and `pl_league_members` are closed to anon
+entirely — `pl_my_leagues` returns your own, unlocked by your code, so a league you're not in
+never reaches the device. An admin gets the full list through `pl_all_leagues` because
+managing membership needs it, but is still ranked only in their own leagues. *Everyone* is an
+admin view by definition, since it ignores membership. Run `league-privacy.sql`.
+
 ## Two tiers of truth
 
 The group kept a spreadsheet from 2020 onward, and it is correct. The picks rebuilt from the
