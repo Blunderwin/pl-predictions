@@ -313,7 +313,8 @@ tiers are the same thing.
   deterministic `order=` including a tiebreak, or rows repeat or vanish across page
   boundaries.
 
-- **Max 10 players**, enforced in the schema.
+- **No roster cap.** Only an admin can create players, so the ceiling is how many columns
+  the Results table can carry, not a number in the schema.
 - **No auth.** You pick your name and it sticks to the device, same trust model as the whist
   app. Fine for a group who know each other; not fine for strangers.
 - **Scheduled workflows get auto-disabled after 60 days of repo inactivity.** If fixtures go

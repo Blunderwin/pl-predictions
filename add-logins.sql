@@ -132,9 +132,6 @@ begin
   if v_name = '' then
     raise exception 'name required' using errcode = 'P0004';
   end if;
-  if (select count(*) from pl_players) >= 10 then
-    raise exception 'roster is full at 10' using errcode = 'P0004';
-  end if;
   if exists (select 1 from pl_players p where lower(trim(p.name)) = lower(v_name)) then
     raise exception 'that name is taken' using errcode = 'P0004';
   end if;

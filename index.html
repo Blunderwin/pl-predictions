@@ -144,7 +144,7 @@
   .pk[disabled]{opacity:.4;cursor:not-allowed}
 
   /* Who has called it, by initial. Never which way. */
-  .whodunnit{display:flex;gap:4px;margin-top:4px}
+  .whodunnit{display:flex;flex-wrap:wrap;gap:3px 4px;margin-top:4px}
   .whodunnit span{font-family:"Space Mono";font-size:9.5px;line-height:1;letter-spacing:.02em;
     min-width:15px;height:14px;padding:0 3px;display:inline-grid;place-items:center;
     border:1px solid var(--rule);border-radius:3px;color:#4d5560;background:transparent}
@@ -367,8 +367,7 @@ const CONFIG = {
   supabase: {
     url: "https://iyojwrkfqcxpwdoigmuz.supabase.co",
     anonKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml5b2p3cmtmcWN4cHdkb2lnbXV6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI2Mzc1NTQsImV4cCI6MjA5ODIxMzU1NH0.rtduCfAYXYc2GtUZIE2TXKYKYzSp429y-IakQ5t43YE"
-  },
-  maxPlayers: 10
+  }
 };
 
 const mem = new Map();

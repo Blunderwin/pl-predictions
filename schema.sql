@@ -56,7 +56,7 @@ drop policy if exists "anon read players"  on pl_players;
 drop policy if exists "anon add players"   on pl_players;
 create policy "anon read players" on pl_players for select using (true);
 create policy "anon add players"  on pl_players for insert
-  with check ((select count(*) from pl_players) < 10);
+  with check (true);
 
 
 -- ---------- Predictions ----------
